@@ -44,26 +44,26 @@ public class SOISMCTS : AI
         //select a random game state from the information set root node of the tree with a uniform distribution
         //we will use only nodes and actions compatible with this state
         ISNode v = tree.GetRootNode();
-        SeededGameState d = v.GetDeterminisation((ulong) rng.Next());
-        //TODO:: get moves compatible with this determinisation
+        SeededGameState state = v.GetRandomEquivalentState((ulong) rng.Next());
+        //TODO:: get moves compatible with this determinisation (use IsLegalMove function?)
         List<Move> compatibleMoves = possibleMoves;
+        Determinisation d = new Determinisation(state, compatibleMoves);
         
         Stopwatch s = new Stopwatch();
         s.Start();
         while (s.Elapsed < _timeForMoveComputation)
         {
             //enter selection routine - return a node along with determinisation and compatible move set
-            Tuple<ISNode, SeededGameState, List<Move>> nodeGameStateAndMoves = select(tree, v, d, compatibleMoves);
-            v = nodeGameStateAndMoves.Item1;
-            d = nodeGameStateAndMoves.Item2;
-            compatibleMoves = nodeGameStateAndMoves.Item3;
+            Tuple<ISNode, Determinisation> nodeAndDeterminisation = select(tree, v, d);
+            v = nodeAndDeterminisation.Item1;
+            d = nodeAndDeterminisation.Item2;
         }
         
         return possibleMoves.PickRandom(rng);
     }
     
     
-    public Tuple<ISNode, SeededGameState> select(ISTree tree, ISNode v, SeededGameState d, List<Move> compatibleMoves)
+    public Tuple<ISNode, Determinisation> select(ISTree tree, ISNode v, Determinisation d)
     { 
         //descend our IS tree (restricted to nodes/actions compatible with d)using our chosen tree policy
         //until a node is reached such that some action from that node leads to
@@ -73,9 +73,9 @@ public class SOISMCTS : AI
         double bestVal = 0;
         ISNode bestNode = v;
         HashSet<Action> uvd = tree.GetActionsWithNoTreeNodes(v, d);
-        while (d.GameEndState != null && uvd.Count == 0)
+        while (d.state.GameEndState != null && uvd.Count == 0)
         {
-            HashSet<ISNode> cvd = tree.GetCompatibleChildrenInTree(v, d, compatibleMoves);
+            HashSet<ISNode> cvd = tree.GetCompatibleChildrenInTree(v, d);
             foreach(ISNode node in cvd)
             {
                 val = TreePolicy(node);
@@ -94,8 +94,8 @@ public class SOISMCTS : AI
             d = d;
             uvd = tree.GetActionsWithNoTreeNodes(v, d);
         }
-        Tuple<ISNode, SeededGameState> selectedNodeAndState = new Tuple<ISNode, SeededGameState>(v, d);
-        return selectedNodeAndState;
+        Tuple<ISNode, Determinisation> selectedNodeAndDeterminisation = new Tuple<ISNode, Determinisation>(v, d);
+        return selectedNodeAndDeterminisation;
     }
 
     private double TreePolicy(ISNode node)
@@ -116,7 +116,7 @@ public class ISTree
     //information set equivalent for a given observing player and edges corresponding to actions from a player
     //whose action it is in the current state that move our game from one state to the next
     public List<ISNode> _nodes;
-    public List<ISLink> _links;
+    public List<ISAction> _actions;
     private ISNode _root;
     
     //constructor to initialise a tree with a root node using the current gameState as a reference state for the 
@@ -136,45 +136,52 @@ public class ISTree
     
     //get children of a node (which are info sets) compatible with a determinatisation d
     //(equivalent of c(v,d) in paper pseudo-code)
-    public HashSet<ISNode> GetCompatibleChildrenInTree(ISNode v, SeededGameState d, List<Move> compatibleMoves)
+    public HashSet<ISNode> GetCompatibleChildrenInTree(ISNode v, Determinisation d)
     {
         HashSet<ISNode> compatibleChildren = new HashSet<ISNode>();
         //var (newSeedGameState, newPossibleMoves) = seedGameState.ApplyMove(nextMove);
-        foreach (ISLink link in _links)
+        foreach (ISAction action in _actions)
         {
-            if (link._startISNode.Equals(v))
+            if (action._startISNode.Equals(v))
             {
-                
-                return link._connectingISAction;
+                //check linking action is compatible with determinisation 
+                if (action.CheckCompatibleAction(d))
+                {
+                    compatibleChildren.Add(action._endISNode);
+                }
             }
         }
-
         return compatibleChildren;
     }
     
     //get actions from a node v and determinisation d, for which v does not have children in the tree
     //equivalent to function u(v,d) in pseudo-code
-    public HashSet<Action> GetActionsWithNoTreeNodes(ISNode v, SeededGameState d)
+    public HashSet<ISAction> GetActionsWithNoTreeNodes(ISNode v, Determinisation d)
     {
-        HashSet<Action> compatibleActions = v.GetCompatibleActions(d);
-        
-        //TODO:find actions that have no node in the tree
-        HashSet<Action> actionWithNoTreeNode = new HashSet<Action>();
-        
-        return actionWithNoTreeNode;
+        HashSet<ISAction> compatibleActions = v.GetCompatibleActions(d);
+        HashSet<ISAction> actionsWithNoTreeNode = new HashSet<Action>();
+
+        foreach (ISAction action in compatibleActions)
+        {
+            if (!_nodes.Contains(action._endISNode))
+            {
+                actionsWithNoTreeNode.Add(action);
+            }
+        }
+        return actionsWithNoTreeNode;
     }
 
     public ISAction GetIncomingActionForNodeInTree(ISNode v)
     {
         //check node is in tree
-        foreach (ISLink link in _links)
+        foreach (ISAction action in _actions)
         {
-             if (link._endISNode.Equals(v))
+             if (action._endISNode.Equals(v))
              {
-                 return link._connectingISAction;
+                 return action;
              }
-         }
-         throw new Exception("GetIncomingActionForNodeInTree: Node not found in ISTree");
+        } 
+        throw new Exception("GetIncomingActionForNodeInTree: Node not found in ISTree");
     }
 }
 
@@ -192,10 +199,10 @@ public class ISNode
         this._observingPlayer = playerObserving;
     }
     
-    //returns a random state (determinisation) for our set of equivalent states
-    public SeededGameState GetDeterminisation(ulong seed)
+    //returns a random state from our set of equivalent states
+    public SeededGameState GetRandomEquivalentState(ulong seed)
     {
-        //need to return a uniformly random pick from states in our equivalene set
+        //need to return a uniformly random pick from states in our equivalence set
         
         //TODO: does this actually return a random state from a uniform distribution across
         //our information set?
@@ -206,8 +213,14 @@ public class ISNode
     //in pseudo-code. Strictly speaking the state d does not need to be a determinisation of
     //an info set, hence A is only a function of d. But coding wise it seems appropriate to place
     //the method here
-    public HashSet<Action> GetCompatibleActions(SeededGameState d)
+    public HashSet<Action> GetCompatibleActions(Determinisation d)
     {
+        compatibleActions
+        //first check that the game state in d is in our information set
+        if (!this.CheckEquivalentState(d.state))
+        {
+            
+        }
         HashSet<Action> compatibleActions = new HashSet<Action>();
         return compatibleActions;
     }
@@ -227,6 +240,14 @@ public class ISNode
         }
     }
 
+    //check whether or not a given state is in the equivalence set of states defined by this ISNode
+    public bool CheckEquivalentState(SeededGameState state)
+    {
+        //TODO: How do we do this? need to check visible information is equivalent
+        //check current player is the same etc
+        return false;
+    }
+
     // Override GetHashCode method to ensure consistency with Equals
     public override int GetHashCode()
     {
@@ -235,55 +256,94 @@ public class ISNode
 }
 
 //class to encapsulate links between ISNodes, these correspond to an action that can can be taken for the
-//player to move from a starting information set to an end info set
-public class ISLink
+//player to move from a starting information set to an end info set. Each action is an equivalence class of edges
+//so that many moves between states can correspond to a single action 
+public class ISAction
 {
     public ISNode _startISNode;
     public ISNode _endISNode;
-    public ISAction _connectingISAction;
-
-    public ISLink(ISNode sourceNode, ISNode destinationNode, ISAction connectISAction)
-    {
-        this._startISNode = sourceNode;
-        this._endISNode = destinationNode;
-        this._connectingISAction = connectISAction;
-    }
-}
-
-//an action is an equivalence class of edges. Each edge is a link between two specific game states 
-//(determinisations). Two edges are equivalent if 1. They do not belong to the same starting determinisation
-//2. The start info set is the same for both edges 3. The end info set is the same for both edges
-//4 All edges in an action class have the same player about to start (corresponding to player for start ISNode)
-//TODO: I dont understand point 1?
-public class ISAction
-{
-    private ISNode _startISNode;
-    private ISNode _endISNode;
-    private Edge _refEdge;
     
-    public ISAction(ISNode startNode, ISNode endNode, Edge refEdge)
+    public ISAction(ISNode startNode, ISNode endNode)
     {
         this._startISNode = startNode;
         this._endISNode = endNode;
-        this._refEdge = refEdge;
-        
-        //TODO: check start and end state of refEdge are part of the startNode and endNode information sets
     }
     
-    //check this action is compatible with a particular determinisation of the startNode
+    //check this action is compatible with a particular determinisation
+    public bool CheckCompatibleAction(Determinisation d)
+    {
+        //check state for determinisation d is contained within the starting ISNode
+        bool checkState = _startISNode.CheckEquivalentState(d.state);
+        
+        //check that at least one of the compatible moves for our determinisation corresponds
+        //to an edge that is in the equivalence class defined by this action
+        bool checkMoves = false;
+        foreach (Move move in d.moves)
+        {
+            var (newSeedGameState, newPossibleMoves) = d.state.ApplyMove(move);
+            Edge edge = new Edge(d.state, newSeedGameState);
+            if (this.CheckEquivalentEdge(edge))
+            {
+                checkMoves = true;
+                break;
+            }
+        }
 
+        if (checkState && checkMoves)
+        {
+            return true;
+        }
+        else
+        {
+            return false;
+        }
+    }
+    
+    //function to check if a given edge belong to the equivalence class defined by this action.
+    //Each edge is a link between two specific game states . Two edges are equivalent if:
+    //1. They do not belong to the same starting state (TODO: Why?, Also our ISNode has no specific starting state)
+    //2. Both edges have the same player about to start 
+    //3. The start info set is the same for both edges
+    //4. The end info set is the same for both edges
+    public bool CheckEquivalentEdge(Edge edge)
+    {
+        //check that the start info set is the same for both edges. To do this we can check that the
+        //starting game state in the edge belongs to the state equivalence class defined in the starting ISNode
+        //This also includes the check that both have the same player about to move
+        if (!_startISNode.CheckEquivalentState(edge._startState))
+        {
+            return false;
+        }
+        //check that the end info set is the same for both edges.
+        if (!_endISNode.CheckEquivalentState(edge._endState))
+        {
+            return false;
+        }
+        return true;
+    }
 }
 
-//this defines a specific move between two concrete game states or determinisations
+//this defines a specific move between two concrete game states 
 public class Edge
 {
-    private SeededGameState _startState;
-    private SeededGameState _endState;
-    private Move _move;
-    public Edge(SeededGameState startState, SeededGameState endState, Move playerMove)
+    public SeededGameState _startState;
+    public SeededGameState _endState;
+    public Edge(SeededGameState startState, SeededGameState endState)
     {
         this._startState = startState;
         this._endState = endState;
-        this._move = playerMove;
+    }
+}
+
+//struct to encapsulate a specific determinisation, which includes a concrete game state and compatible moves
+public struct Determinisation
+{
+    public SeededGameState state;
+    public List<Move> moves;
+
+    public Determinisation(SeededGameState gamestate, List<Move> compatibleMoves)
+    {
+        state = gamestate;
+        moves = compatibleMoves;
     }
 }
