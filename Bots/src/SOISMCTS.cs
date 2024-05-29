@@ -37,17 +37,18 @@ public class SOISMCTS : AI
     public override Move Play(GameState gameState, List<Move> possibleMoves, TimeSpan remainingTime)
     {
         _myID = gameState.CurrentPlayer.PlayerID;
-        //Initialise a single node information set  tree using current game state as the root node
-        //and the assumed observing player
-        ISTree tree = new ISTree(gameState, _myID); 
         
-        //select a random game state from the information set root node of the tree with a uniform distribution
-        //we will use only nodes and actions compatible with this state
+        //create a determinisation of the current game state
+        SeededGameState rootRefState = gameState.ToSeededGameState((ulong) rng.Next());
+        
+        //Initialise a single node information set tree using the seeded game state as a reference state
+        //for the set of equivalent states that define the root node
+        ISTree tree = new ISTree(rootRefState, _myID); 
         ISNode v = tree.GetRootNode();
-        SeededGameState state = v.GetRandomEquivalentState((ulong) rng.Next());
+        
         //TODO:: get moves compatible with this determinisation (use IsLegalMove function?)
         List<Move> compatibleMoves = possibleMoves;
-        Determinisation d = new Determinisation(state, compatibleMoves);
+        Determinisation d = new Determinisation(rootRefState, compatibleMoves);
         
         Stopwatch s = new Stopwatch();
         s.Start();
@@ -121,10 +122,10 @@ public class ISTree
     
     //constructor to initialise a tree with a root node using the current gameState as a reference state for the 
     //corresponding information set
-    public ISTree(GameState state, PlayerEnum observingPlayer)
+    public ISTree(SeededGameState refState, PlayerEnum observingPlayer)
     {
         this._nodes = new List<ISNode>();
-        ISNode rootNode = new ISNode(state, observingPlayer);
+        ISNode rootNode = new ISNode(refState, observingPlayer);
         _root = rootNode;
         _nodes.Add(rootNode);
     }
@@ -139,7 +140,6 @@ public class ISTree
     public HashSet<ISNode> GetCompatibleChildrenInTree(ISNode v, Determinisation d)
     {
         HashSet<ISNode> compatibleChildren = new HashSet<ISNode>();
-        //var (newSeedGameState, newPossibleMoves) = seedGameState.ApplyMove(nextMove);
         foreach (ISAction action in _actions)
         {
             if (action._startISNode.Equals(v))
@@ -158,14 +158,64 @@ public class ISTree
     //equivalent to function u(v,d) in pseudo-code
     public HashSet<ISAction> GetActionsWithNoTreeNodes(ISNode v, Determinisation d)
     {
-        HashSet<ISAction> compatibleActions = v.GetCompatibleActions(d);
-        HashSet<ISAction> actionsWithNoTreeNode = new HashSet<Action>();
+        //TODO:Could check d is part of the information set for v here
 
-        foreach (ISAction action in compatibleActions)
+        HashSet<ISAction> actionsWithNoTreeNode = new HashSet<ISAction>();
+
+        //get list of actions with v as a starting node
+        HashSet<ISAction> actionsWithStartNodev = new HashSet<ISAction>();
+        foreach (ISAction action in _actions)
         {
-            if (!_nodes.Contains(action._endISNode))
+            if (action._startISNode.Equals(v))
             {
-                actionsWithNoTreeNode.Add(action);
+                actionsWithStartNodev.Add(action);
+            }
+        }
+
+        //generate all possible states from d with the possible moves
+        List<SeededGameState> possibleStates = new List<SeededGameState>();
+        foreach (Move move in d.moves)
+        {
+            var (newSeedGameState, newPossibleMoves) = d.state.ApplyMove(move);
+            possibleStates.Add(newSeedGameState);
+        }
+
+        //then for each state that can be generated from d, check to see if that state belong to the information
+        //set of any end node that belongs to an action that has start node v. If it does not, generate a new 
+        //information set that contains it in it's equivalence set.
+        bool foundNode;
+        foreach (SeededGameState state in possibleStates)
+        {
+            foundNode = false;
+            foreach (ISAction action in actionsWithStartNodev)
+            {
+                if (action._endISNode.CheckEquivalentState(state))
+                {
+                    foundNode = true;
+                    break;
+                }
+            }
+
+            //also check if state is an equivalent state to an already generated new node
+            if (!foundNode)
+            {
+                foreach (ISAction action in actionsWithNoTreeNode)
+                {
+                    if (action._endISNode.CheckEquivalentState(state))
+                    {
+                        foundNode = true;
+                        break;
+                    }
+                }
+            }
+
+            //otherwise create a new information set corresponding to state
+            if (!foundNode)
+            {
+                ISNode newNode = new ISNode(state, ???); //TODO: figure out how we deal with observing vs current player?
+                //then create a new action and add it our set
+                ISAction newAction = new ISAction(v, newNode);
+                actionsWithNoTreeNode.Add(newAction);
             }
         }
         return actionsWithNoTreeNode;
@@ -189,26 +239,16 @@ public class ISTree
 public class ISNode
 {
     //reference state, i.e. one instance of the set of equivalent states
-    private GameState _refState;
+    private SeededGameState _refState;
     private PlayerEnum _observingPlayer;
     
     //create a node using a reference state for the information set it encapsulates
-    public ISNode(GameState refState, PlayerEnum playerObserving)
+    public ISNode(SeededGameState refState, PlayerEnum playerObserving)
     {
         this._refState = refState;
         this._observingPlayer = playerObserving;
     }
     
-    //returns a random state from our set of equivalent states
-    public SeededGameState GetRandomEquivalentState(ulong seed)
-    {
-        //need to return a uniformly random pick from states in our equivalence set
-        
-        //TODO: does this actually return a random state from a uniform distribution across
-        //our information set?
-        return _refState.ToSeededGameState(seed);
-    }
-
     //get actions available from info set, compatible with determinisation d. This is A(d) 
     //in pseudo-code. Strictly speaking the state d does not need to be a determinisation of
     //an info set, hence A is only a function of d. But coding wise it seems appropriate to place
