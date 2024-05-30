@@ -15,7 +15,7 @@ public class SOISMCTS : AI
     private TimeSpan _usedTimeInTurn = TimeSpan.FromSeconds(0);
     private TimeSpan _timeForMoveComputation = TimeSpan.FromSeconds(0.3);
     private TimeSpan _TurnTimeout = TimeSpan.FromSeconds(10.0);
-    private PlayerEnum _myID;
+
     private void PrepareForGame()
     { 
         //if any agent set-up needed it can be done here
@@ -36,15 +36,16 @@ public class SOISMCTS : AI
 
     public override Move Play(GameState gameState, List<Move> possibleMoves, TimeSpan remainingTime)
     {
-        _myID = gameState.CurrentPlayer.PlayerID;
+        //we assume that the observing player is fixed for our game tree, and is the player controlled by our bot
+        PlayerEnum observingPlayer = gameState.CurrentPlayer.PlayerID;
         
         //create a determinisation of the current game state
         SeededGameState rootRefState = gameState.ToSeededGameState((ulong) rng.Next());
         
         //Initialise a single node information set tree using the seeded game state as a reference state
         //for the set of equivalent states that define the root node
-        ISTree tree = new ISTree(rootRefState, _myID); 
-        ISNode v = tree.GetRootNode();
+        ISTree tree = new ISTree(rootRefState, observingPlayer);
+        ISNode v = tree._root;
         
         //TODO:: get moves compatible with this determinisation (use IsLegalMove function?)
         List<Move> compatibleMoves = possibleMoves;
@@ -73,7 +74,7 @@ public class SOISMCTS : AI
         double val = 0;
         double bestVal = 0;
         ISNode bestNode = v;
-        HashSet<Action> uvd = tree.GetActionsWithNoTreeNodes(v, d);
+        HashSet<ISAction> uvd = tree.GetActionsWithNoTreeNodes(v, d);
         while (d.state.GameEndState != null && uvd.Count == 0)
         {
             HashSet<ISNode> cvd = tree.GetCompatibleChildrenInTree(v, d);
@@ -116,39 +117,35 @@ public class ISTree
     //our information set tree is a connected graph, with each node consisting of states of the game that are
     //information set equivalent for a given observing player and edges corresponding to actions from a player
     //whose action it is in the current state that move our game from one state to the next
-    public List<ISNode> _nodes;
-    public List<ISAction> _actions;
-    private ISNode _root;
+    public List<ISNode> _treeNodes;
+    public List<ISAction> _treeActions;
+    public ISNode _root;
+    public PlayerEnum _observingPlayer;
     
     //constructor to initialise a tree with a root node using the current gameState as a reference state for the 
     //corresponding information set
     public ISTree(SeededGameState refState, PlayerEnum observingPlayer)
     {
-        this._nodes = new List<ISNode>();
-        ISNode rootNode = new ISNode(refState, observingPlayer);
-        _root = rootNode;
-        _nodes.Add(rootNode);
-    }
-
-    public ISNode GetRootNode()
-    {
-        return _root;
+        _treeNodes = new List<ISNode>();
+        _root = new ISNode(refState, observingPlayer);
+        _treeNodes.Add(_root);
+        _observingPlayer = observingPlayer;
     }
     
-    //get children of a node (which are info sets) compatible with a determinatisation d
-    //(equivalent of c(v,d) in paper pseudo-code)
+    //get children of a node (which are info sets) compatible with a determinatisation d, which are contained in 
+    //our tree (equivalent of c(v,d) in paper pseudo-code)
     public HashSet<ISNode> GetCompatibleChildrenInTree(ISNode v, Determinisation d)
     {
+        //first we get compatible actions
+        HashSet<ISAction> compatibleActions = v.GetCompatibleActions(d);
+        
+        //then for each action we check if the end node is in the tree or not
         HashSet<ISNode> compatibleChildren = new HashSet<ISNode>();
-        foreach (ISAction action in _actions)
+        foreach (ISAction action in compatibleActions)
         {
-            if (action._startISNode.Equals(v))
+            if (_treeNodes.Contains(action._endISNode))
             {
-                //check linking action is compatible with determinisation 
-                if (action.CheckCompatibleAction(d))
-                {
-                    compatibleChildren.Add(action._endISNode);
-                }
+                compatibleChildren.Add(action._endISNode);
             }
         }
         return compatibleChildren;
@@ -158,64 +155,17 @@ public class ISTree
     //equivalent to function u(v,d) in pseudo-code
     public HashSet<ISAction> GetActionsWithNoTreeNodes(ISNode v, Determinisation d)
     {
-        //TODO:Could check d is part of the information set for v here
-
+        //generate all actions compatible with determinisation d
+        HashSet<ISAction> compatibleActions = v.GetCompatibleActions(d); //Note this is also run as part of c(v,d) which isnt very efficient
+        
+        //then for each action that can be generated from d, check to see if that action is in our tree,
+        //if not then add it out list of actions with no tree nodes
         HashSet<ISAction> actionsWithNoTreeNode = new HashSet<ISAction>();
-
-        //get list of actions with v as a starting node
-        HashSet<ISAction> actionsWithStartNodev = new HashSet<ISAction>();
-        foreach (ISAction action in _actions)
+        foreach (ISAction action in compatibleActions)
         {
-            if (action._startISNode.Equals(v))
+            if (!_treeActions.Contains(action))
             {
-                actionsWithStartNodev.Add(action);
-            }
-        }
-
-        //generate all possible states from d with the possible moves
-        List<SeededGameState> possibleStates = new List<SeededGameState>();
-        foreach (Move move in d.moves)
-        {
-            var (newSeedGameState, newPossibleMoves) = d.state.ApplyMove(move);
-            possibleStates.Add(newSeedGameState);
-        }
-
-        //then for each state that can be generated from d, check to see if that state belong to the information
-        //set of any end node that belongs to an action that has start node v. If it does not, generate a new 
-        //information set that contains it in it's equivalence set.
-        bool foundNode;
-        foreach (SeededGameState state in possibleStates)
-        {
-            foundNode = false;
-            foreach (ISAction action in actionsWithStartNodev)
-            {
-                if (action._endISNode.CheckEquivalentState(state))
-                {
-                    foundNode = true;
-                    break;
-                }
-            }
-
-            //also check if state is an equivalent state to an already generated new node
-            if (!foundNode)
-            {
-                foreach (ISAction action in actionsWithNoTreeNode)
-                {
-                    if (action._endISNode.CheckEquivalentState(state))
-                    {
-                        foundNode = true;
-                        break;
-                    }
-                }
-            }
-
-            //otherwise create a new information set corresponding to state
-            if (!foundNode)
-            {
-                ISNode newNode = new ISNode(state, ???); //TODO: figure out how we deal with observing vs current player?
-                //then create a new action and add it our set
-                ISAction newAction = new ISAction(v, newNode);
-                actionsWithNoTreeNode.Add(newAction);
+                actionsWithNoTreeNode.Add(action);
             }
         }
         return actionsWithNoTreeNode;
@@ -224,7 +174,7 @@ public class ISTree
     public ISAction GetIncomingActionForNodeInTree(ISNode v)
     {
         //check node is in tree
-        foreach (ISAction action in _actions)
+        foreach (ISAction action in _treeActions)
         {
              if (action._endISNode.Equals(v))
              {
@@ -250,34 +200,39 @@ public class ISNode
     }
     
     //get actions available from info set, compatible with determinisation d. This is A(d) 
-    //in pseudo-code. Strictly speaking the state d does not need to be a determinisation of
-    //an info set, hence A is only a function of d. But coding wise it seems appropriate to place
-    //the method here
-    public HashSet<Action> GetCompatibleActions(Determinisation d)
+    //in pseudo-code. 
+    public HashSet<ISAction> GetCompatibleActions(Determinisation d)
     {
-        compatibleActions
         //first check that the game state in d is in our information set
+        HashSet<ISAction> compatibleActions = new HashSet<ISAction>();
         if (!this.CheckEquivalentState(d.state))
         {
-            
+            //in this case return an empty set
+            return compatibleActions;
         }
-        HashSet<Action> compatibleActions = new HashSet<Action>();
-        return compatibleActions;
-    }
+        
+        //generate all possible states from d with the list of possible moves
+        List<SeededGameState> possibleStates = new List<SeededGameState>();
+        foreach (Move move in d.moves)
+        {
+            var (newSeedGameState, newPossibleMoves) = d.state.ApplyMove(move);
+            possibleStates.Add(newSeedGameState);
+        }
+        
+        //next for each possible new state compatible with our determinisation d we generate an ISNode and a
+        //corresponding action being careful not to duplicate.
+        foreach (SeededGameState state in possibleStates)
+        {
+            ISNode newNode = new ISNode(state, _observingPlayer);
+            ISAction newAction = new ISAction(this, newNode);
 
-    // Override Equals method to define equality
-    public override bool Equals(object obj)
-    {
-        ISNode node = (ISNode)obj;
-        //check if reference states are equivalent
-        if (this._refState.Equals(node._refState) && node._observingPlayer == this._observingPlayer)
-        {
-            return true;
+            if (!compatibleActions.Contains(newAction))
+            {
+                compatibleActions.Add(newAction);
+            }
         }
-        else
-        {
-            return false;
-        }
+
+        return compatibleActions;
     }
 
     //check whether or not a given state is in the equivalence set of states defined by this ISNode
@@ -287,11 +242,22 @@ public class ISNode
         //check current player is the same etc
         return false;
     }
+    
+    // Override Equals method to define equality
+    public override bool Equals(object obj)
+    {
+        ISNode node = (ISNode)obj;
+
+        return (this.CheckEquivalentState(node._refState) && this._observingPlayer == node._observingPlayer);
+    }
 
     // Override GetHashCode method to ensure consistency with Equals
     public override int GetHashCode()
     {
-        return (this._refState, this._observingPlayer).GetHashCode();
+        //TODO: how do we do this when the reference state might be changed to any other equivalent state to give us the 
+        //same node?
+        //return (this._refState, this._observingPlayer).GetHashCode();
+        return 0;
     }
 }
 
@@ -310,34 +276,33 @@ public class ISAction
     }
     
     //check this action is compatible with a particular determinisation
-    public bool CheckCompatibleAction(Determinisation d)
-    {
-        //check state for determinisation d is contained within the starting ISNode
-        bool checkState = _startISNode.CheckEquivalentState(d.state);
-        
-        //check that at least one of the compatible moves for our determinisation corresponds
-        //to an edge that is in the equivalence class defined by this action
-        bool checkMoves = false;
-        foreach (Move move in d.moves)
-        {
-            var (newSeedGameState, newPossibleMoves) = d.state.ApplyMove(move);
-            Edge edge = new Edge(d.state, newSeedGameState);
-            if (this.CheckEquivalentEdge(edge))
-            {
-                checkMoves = true;
-                break;
-            }
-        }
-
-        if (checkState && checkMoves)
-        {
-            return true;
-        }
-        else
-        {
-            return false;
-        }
-    }
+   // public bool CheckCompatibleAction(Determinisation d)
+   //{
+   //     //check state for determinisation d is contained within the starting ISNode
+   //     bool checkState = _startISNode.CheckEquivalentState(d.state);
+//
+//        //check that at least one of the compatible moves for our determinisation corresponds
+//        //to an edge that is in the equivalence class defined by this action
+//        bool checkMoves = false;
+//        foreach (Move move in d.moves)
+//        {
+//            var (newSeedGameState, newPossibleMoves) = d.state.ApplyMove(move);
+//            Edge edge = new Edge(d.state, newSeedGameState);
+//            if (this.CheckEquivalentEdge(edge))
+//            {
+//                checkMoves = true;/               break;
+// /          }
+//        }
+//
+//        if (checkState && checkMoves)
+//        {
+//            return true;
+//        }
+//        else
+//        {
+//            return false;
+//        }
+//    }
     
     //function to check if a given edge belong to the equivalence class defined by this action.
     //Each edge is a link between two specific game states . Two edges are equivalent if:
@@ -360,6 +325,19 @@ public class ISAction
             return false;
         }
         return true;
+    }
+    
+    // Override Equals method to define equality
+    public override bool Equals(object obj)
+    {
+        ISAction action = (ISAction)obj;
+        return (_startISNode.Equals(action._startISNode) && _endISNode.Equals(action._endISNode));
+    }
+
+    // Override GetHashCode method to ensure consistency with Equals
+    public override int GetHashCode()
+    {
+        return (_startISNode, _endISNode).GetHashCode();
     }
 }
 
