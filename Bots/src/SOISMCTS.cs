@@ -76,10 +76,10 @@ public class SOISMCTS : AI
         double val = 0;
         double bestVal = 0;
         ISNode bestNode = v;
-        HashSet<ISAction> uvd = tree.GetActionsWithNoTreeNodes(v, d);
+        List<ISAction> uvd = tree.GetActionsWithNoTreeNodes(v, d);
         while (d.state.GameEndState != null && uvd.Count == 0)
         {
-            HashSet<ISNode> cvd = tree.GetCompatibleChildrenInTree(v, d);
+            List<ISNode> cvd = tree.GetCompatibleChildrenInTree(v, d);
             foreach(ISNode node in cvd)
             {
                 val = TreePolicy(node);
@@ -214,17 +214,50 @@ public class ISTree
 //Node for an ISTree, each node corresponds to an information set for the observing player for a tree
 public class ISNode
 {
-    //reference state, i.e. one instance of the set of equivalent states
+    //reference state, i.e. one instance of the set of equivalent states, however this will be in a 'canonical form'
+    //to support hash based searches 
     private SeededGameState _refState; //(do we need to change this to a determinisation and if so that isn't the equivalence class)
     private PlayerEnum _observingPlayer;
     
     //create a node using a reference state for the information set it encapsulates
     public ISNode(SeededGameState refState, PlayerEnum playerObserving)
     {
-        this._refState = refState;
+        //in order to support hashing we convert the refState into a 'canonical state'. Hashing then speeds up
+        //searching for nodes
+        this._refState = ConvertToCanonical(refState);
         this._observingPlayer = playerObserving;
     }
-    
+
+    public SeededGameState ConvertToCanonical(SeededGameState state)
+    {
+        //we need to make sure that all elements of a game state have a well defined order (both for hidden and non-hidden information)
+        
+        //what happens if hidden information is different? ISNode should not care but GetHashCode will care....
+        //this is oK, just means we still need to define a function which correctly implements the equivalence relation
+        
+        
+        //we define a canonical state as one where all the elements of the seededGameSate are in a particualr order
+        //this needs to be true for both hidden and non-hidden information.
+        //note this does not change the legal moves for the state
+        //note this needs to be only done once when a tree node is constructed and this will then support all future search operations
+        //converting Contains() from O(n) to O(1) (via GetHashCode)
+        
+        //first we deal with information visible to the current player
+        
+        
+        //then for information that is hideen to the current player
+        
+        
+        return state;
+    }
+
+    //check if a state is part of the equivalence class for this node
+    public bool CheckEquivalentState(SeededGameState state)
+    {
+        //TODO: Does the equals function work ok for seeded game states?
+        return _refState.Equals(ConvertToCanonical(state));
+    }
+
     //get actions available from info set, compatible with determinisation d. This is A(d) 
     //in pseudo-code. 
     public HashSet<ISAction> GetCompatibleActions(Determinisation d)
@@ -260,99 +293,25 @@ public class ISNode
 
         return compatibleActions;
     }
-
-    //check whether or not a given state is in the equivalence set of states defined by this ISNode
-    public bool CheckEquivalentState(SeededGameState state)
-    {
-        //to check whether two seeded states are in the same equivalence set we need to check that all the 
-        //visible information for the current player is the same for the SeededGameStates refState and state 
-        //TODO: check entries in state to see if anything missing from list below
-        //TODO: Should we check the cool down pile as well? Is this know for both players?
-        
-        //check current player is the same
-        if (state.CurrentPlayer.PlayerID != _refState.CurrentPlayer.PlayerID)
-        
-        //check board state is the same
-        if (state.BoardState != _refState.BoardState)
-            return false;
-        
-        //check coins are the same in both states for both players
-        if (state.CurrentPlayer.Coins != _refState.CurrentPlayer.Coins |
-            state.EnemyPlayer.Coins != _refState.EnemyPlayer.Coins)
-            return false;
-        
-        //check prestige is the same in both states for both players
-        if (state.CurrentPlayer.Power != _refState.CurrentPlayer.Power |
-            state.EnemyPlayer.Power != _refState.EnemyPlayer.Power)
-            return false;
-        
-        //check power is the same in both states for both players
-        if (state.CurrentPlayer.Power != _refState.CurrentPlayer.Power|
-            state.EnemyPlayer.Power != _refState.EnemyPlayer.Power)
-            return false;
-        
-        //check tavern cards on board are the same up to a permutation
-        if (!AreListsPermutations<UniqueCard>(state.TavernAvailableCards, _refState.TavernAvailableCards))
-            return false;
-        
-        //check current player's hand is the same up to a permutation
-        if (!AreListsPermutations<UniqueCard>(state.CurrentPlayer.Hand, _refState.CurrentPlayer.Hand))
-            return false;
-        
-        //check played cards are the same up to a permutation
-        if (!(AreListsPermutations<UniqueCard>(state.CurrentPlayer.Played, _refState.CurrentPlayer.Played) 
-              && AreListsPermutations<UniqueCard>(state.EnemyPlayer.Played, _refState.EnemyPlayer.Played)))
-            return false;
-        
-        //check that known upcoming draws for the current player are the same (what are these? presumably current player
-        //does not know upcoming draws for enemy player)
-        if (!AreListsPermutations<UniqueCard>(state.CurrentPlayer.KnownUpcomingDraws, _refState.CurrentPlayer.KnownUpcomingDraws))
-            return false;
-        
-        //check agents on the board are the same for both players up to a permutation
-        if (!(AreListsPermutations<SerializedAgent>(state.CurrentPlayer.Agents, _refState.CurrentPlayer.Agents) 
-              && AreListsPermutations<SerializedAgent>(state.EnemyPlayer.Agents, _refState.EnemyPlayer.Agents)))
-            return false;
-        
-        //check identical patron status. So for the list of patron for this games we check that the favour status for
-        //each patron is the same between our states
-        foreach(PatronId id in state.Patrons)
-        {
-            if (state.PatronStates.All[id] != _refState.PatronStates.All[id])
-                return false;
-        }
-        
-        //if we survive all our tests return true
-        return true;
-    }
     
     // Override Equals method to define equality
     public override bool Equals(object obj)
     {
         ISNode node = (ISNode)obj;
 
-        return (this.CheckEquivalentState(node._refState) && this._observingPlayer == node._observingPlayer);
+        //return (this.CheckEquivalentState(node._refState) && this._observingPlayer == node._observingPlayer);
+        //note the following is reliant on our refernce states being in a canonical form and therefore can be directly
+        //compared ot one another.
+        //TODO::Is the equals function OK to use on the SeededGameState object?
+        return (this._refState.Equals(node._refState) && this._observingPlayer == node._observingPlayer);
     }
 
     // Override GetHashCode method to ensure consistency with Equals
     public override int GetHashCode()
     {
-        //TODO: how do we do this when the reference state might be changed to any other equivalent state to give us the 
-        //same node?
-        //return (this._refState, this._observingPlayer).GetHashCode();
-        return 0;
-    }
-    
-    //function to check if set of cards are the same up to ordering
-    public static bool AreListsPermutations<T>(List<T> list1, List<T> list2)
-    {
-        if (list1.Count != list2.Count)
-            return false;
-
-        var sortedList1 = list1.OrderBy(x => x).ToList();
-        var sortedList2 = list2.OrderBy(x => x).ToList();
-
-        return sortedList1.SequenceEqual(sortedList2);
+        //note this is reliant on our reference states for our nodes being converted into a canonical form
+        //so that _refState is the same for any two nodes with the same state equivalence classes
+        return (this._refState, this._observingPlayer).GetHashCode();
     }
 }
 
@@ -396,3 +355,92 @@ public struct Determinisation
         moves = compatibleMoves;
     }
 }
+
+  /*//check whether or not a given state is in the equivalence set of states defined by this ISNode
+    //this is redudant due to moving to using a  canconical reference state....
+    public bool CheckEquivalentState(SeededGameState state)
+    {
+        //to check whether two seeded states are in the same equivalence set we need to check that all the 
+        //visible information for the current player is the same for the SeededGameStates refState and state 
+        //TODO: check entries in state to see if anything missing from list below
+        //TODO: Should we check the cool down pile as well? Is this known for both players?
+        
+        //check current player is the same
+        if (state.CurrentPlayer.PlayerID != _refState.CurrentPlayer.PlayerID)
+        
+        //check board state is the same
+        if (state.BoardState != _refState.BoardState)
+            return false;
+        
+        //check coins are the same in both states for both players
+        if (state.CurrentPlayer.Coins != _refState.CurrentPlayer.Coins |
+            state.EnemyPlayer.Coins != _refState.EnemyPlayer.Coins)
+            return false;
+        
+        //check prestige is the same in both states for both players
+        if (state.CurrentPlayer.Power != _refState.CurrentPlayer.Power |
+            state.EnemyPlayer.Power != _refState.EnemyPlayer.Power)
+            return false;
+        
+        //check power is the same in both states for both players
+        if (state.CurrentPlayer.Power != _refState.CurrentPlayer.Power|
+            state.EnemyPlayer.Power != _refState.EnemyPlayer.Power)
+            return false;
+        
+        //TODO: check these permutations functions work as expected.
+        //check tavern cards on board are the same up to a permutation
+        if (!AreListsPermutations<UniqueCard>(state.TavernAvailableCards, _refState.TavernAvailableCards))
+            return false;
+        
+        //check current player's hand is the same up to a permutation
+        if (!AreListsPermutations<UniqueCard>(state.CurrentPlayer.Hand, _refState.CurrentPlayer.Hand))
+            return false;
+        
+        //check played cards are the same up to a permutation (TODO:: or should they just be the same? does order matter for played cards?)
+        if (!(AreListsPermutations<UniqueCard>(state.CurrentPlayer.Played, _refState.CurrentPlayer.Played) 
+              && AreListsPermutations<UniqueCard>(state.EnemyPlayer.Played, _refState.EnemyPlayer.Played)))
+            return false;
+        
+        //check that known upcoming draws for the current player are the same (what are these? presumably current player
+        //does not know upcoming draws for enemy player?)
+        if (!AreListsPermutations<UniqueCard>(state.CurrentPlayer.KnownUpcomingDraws, _refState.CurrentPlayer.KnownUpcomingDraws))
+            return false;
+        
+        //check agents on the board are the same for both players up to a permutation
+        if (!(AreListsPermutations<SerializedAgent>(state.CurrentPlayer.Agents, _refState.CurrentPlayer.Agents) 
+              && AreListsPermutations<SerializedAgent>(state.EnemyPlayer.Agents, _refState.EnemyPlayer.Agents)))
+            return false;
+        
+        //check identical patron status. So for the list of patron for this games we check that the favour status for
+        //each patron is the same between our states
+        foreach(PatronId id in state.Patrons)
+        {
+            if (state.PatronStates.All[id] != _refState.PatronStates.All[id])
+                return false;
+        }
+
+        //other items to check?
+        //state.CompletedActions;
+        //state.UpcomingEffects;
+        //state.StartOfNextTurnEffects;
+        //state.PendingChoice;
+        //state.GameEndState;
+        //state.CurrentPlayer.CooldownPile;
+        //state.CurrentPlayer.PatronCalls;
+        //state.ComboStates
+        
+        //if we survive all our tests return true
+        return true;
+    }*/
+    
+    // //function to check if set of cards are the same up to ordering
+    // public static bool AreListsPermutations<T>(List<T> list1, List<T> list2)
+    // {
+    //     if (list1.Count != list2.Count)
+    //         return false;
+    //
+    //     var sortedList1 = list1.OrderBy(x => x).ToList();
+    //     var sortedList2 = list2.OrderBy(x => x).ToList();
+    //
+    //     return sortedList1.SequenceEqual(sortedList2);
+    // }
