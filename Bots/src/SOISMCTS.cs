@@ -3,7 +3,7 @@ using ScriptsOfTribute.AI;
 using ScriptsOfTribute.Board;
 using ScriptsOfTribute.Serializers;
 using System.Diagnostics;
-using System.Collections.Generic;
+using ScriptsOfTribute.Board.Cards;
 
 namespace Bots;
 
@@ -11,10 +11,10 @@ namespace Bots;
 public class SOISMCTS : AI
 {
     //note the seed should be removed so that it is based off the system clock, once the code is working
-    private readonly SeededRandom rng = new(123);
     private TimeSpan _usedTimeInTurn = TimeSpan.FromSeconds(0);
     private TimeSpan _timeForMoveComputation = TimeSpan.FromSeconds(0.3);
     private TimeSpan _TurnTimeout = TimeSpan.FromSeconds(10.0);
+    SeededRandom rng = new(123); //TODO: initialise using clock when code complete
 
     private void PrepareForGame()
     { 
@@ -39,31 +39,33 @@ public class SOISMCTS : AI
         //we assume that the observing player is fixed for our game tree, and is the player controlled by our bot
         PlayerEnum observingPlayer = gameState.CurrentPlayer.PlayerID;
         
-        //create a determinisation of the current game state
-        SeededGameState rootRefState = gameState.ToSeededGameState((ulong) rng.Next());
+        //Initialise a single node information set tree using the GameState object and list of possible moves. These can
+        //then be used to generate a random determinisation (concrete state and legal moves pair) of the root information
+        //set node on each iteration of the monte carlo loop. Note we include the possible moves list in our tree constructor
+        //as we will use pass around state plus move pairs in the form of a determinisation struct object.
+        //Seems tidier than keeping track of them separately and risking inconsistencies.
+        ISTree tree = new ISTree(gameState,  possibleMoves, observingPlayer);
         
-        //Initialise a single node information set tree using the seeded game state as a reference state
-        //for the set of equivalent states that define the root node
-        ISTree tree = new ISTree(rootRefState, observingPlayer);
-        ISNode v = tree._root;
-        
-        //TODO:: get moves compatible with this determinisation (use IsLegalMove function?)
-        List<Move> compatibleMoves = possibleMoves;
-        Determinisation d = new Determinisation(rootRefState, compatibleMoves);
-        
+        //in ISMCTS each iteration of the loop starts with a new determinisation we use to explore the SAME tree
+        //updating the stats for each tree node (which are information sets as seen by a chosen observer, in our
+        //case our bot)
         Stopwatch s = new Stopwatch();
         s.Start();
         while (s.Elapsed < _timeForMoveComputation)
         {
-            //enter selection routine - return a node along with determinisation and compatible move set
-            Tuple<ISNode, Determinisation> nodeAndDeterminisation = select(tree, v, d);
-            v = nodeAndDeterminisation.Item1;
-            d = nodeAndDeterminisation.Item2;
+            //create a random determinisation from the tree root
+            Determinisation d0 = tree.GetRootDeterminisation();
+            ISNode v0 = tree._root;
+            
+            //enter selection routine - return a node along with a determinisation (compatible state and move set
+            //ultimately derived from d0)
+            Tuple<ISNode, Determinisation> nodeAndDeterminisation = select(tree, v0, d0);
+            ISNode v = nodeAndDeterminisation.Item1;
+            Determinisation d = nodeAndDeterminisation.Item2;
         }
         
         return possibleMoves.PickRandom(rng);
     }
-    
     
     public Tuple<ISNode, Determinisation> select(ISTree tree, ISNode v, Determinisation d)
     { 
@@ -119,17 +121,41 @@ public class ISTree
     //whose action it is in the current state that move our game from one state to the next
     public List<ISNode> _treeNodes;
     public List<ISAction> _treeActions;
-    public ISNode _root;
+    public GameState _rootGameState;
+    public List<Move> _rootMovesList;
     public PlayerEnum _observingPlayer;
+    public ISNode _root;
+    private readonly SeededRandom _rng = new(123); //TODO: initialise using clock when code complete
     
     //constructor to initialise a tree with a root node using the current gameState as a reference state for the 
     //corresponding information set
-    public ISTree(SeededGameState refState, PlayerEnum observingPlayer)
+    public ISTree(GameState refGameState, List<Move> possibleMoves, PlayerEnum observingPlayer)
     {
         _treeNodes = new List<ISNode>();
-        _root = new ISNode(refState, observingPlayer);
-        _treeNodes.Add(_root);
+        _treeActions = new List<ISAction>();
+        _rootGameState = refGameState;
+        _rootMovesList = possibleMoves;
         _observingPlayer = observingPlayer;
+        
+        //need to generate a reference state to set-up the root information set node (not this does not need to be
+        //the same as the random determinisation from the start of each monet carlo iteration, but by definition should
+        //be an equivalent state
+        Determinisation d = GetRootDeterminisation();
+        
+        _root = new ISNode(d.state, observingPlayer); 
+        _treeNodes.Add(_root);
+    }
+
+    public Determinisation GetRootDeterminisation()
+    {
+        SeededGameState s = _rootGameState.ToSeededGameState((ulong) _rng.Next());
+        
+        //note that the root moves list contains the legal moves for the current player in our seeded game state
+        //(the randomisation only affects hidden information and the current player can see his cards, and the list of possible moves
+        //is based of the current players hand)
+        Determinisation d = new Determinisation(s, _rootMovesList);
+
+        return d;
     }
     
     //get children of a node (which are info sets) compatible with a determinatisation d, which are contained in 
@@ -189,7 +215,7 @@ public class ISTree
 public class ISNode
 {
     //reference state, i.e. one instance of the set of equivalent states
-    private SeededGameState _refState;
+    private SeededGameState _refState; //(do we need to change this to a determinisation and if so that isn't the equivalence class)
     private PlayerEnum _observingPlayer;
     
     //create a node using a reference state for the information set it encapsulates
@@ -238,9 +264,66 @@ public class ISNode
     //check whether or not a given state is in the equivalence set of states defined by this ISNode
     public bool CheckEquivalentState(SeededGameState state)
     {
-        //TODO: How do we do this? need to check visible information is equivalent
-        //check current player is the same etc
-        return false;
+        //to check whether two seeded states are in the same equivalence set we need to check that all the 
+        //visible information for the current player is the same for the SeededGameStates refState and state 
+        //TODO: check entries in state to see if anything missing from list below
+        //TODO: Should we check the cool down pile as well? Is this know for both players?
+        
+        //check current player is the same
+        if (state.CurrentPlayer.PlayerID != _refState.CurrentPlayer.PlayerID)
+        
+        //check board state is the same
+        if (state.BoardState != _refState.BoardState)
+            return false;
+        
+        //check coins are the same in both states for both players
+        if (state.CurrentPlayer.Coins != _refState.CurrentPlayer.Coins |
+            state.EnemyPlayer.Coins != _refState.EnemyPlayer.Coins)
+            return false;
+        
+        //check prestige is the same in both states for both players
+        if (state.CurrentPlayer.Power != _refState.CurrentPlayer.Power |
+            state.EnemyPlayer.Power != _refState.EnemyPlayer.Power)
+            return false;
+        
+        //check power is the same in both states for both players
+        if (state.CurrentPlayer.Power != _refState.CurrentPlayer.Power|
+            state.EnemyPlayer.Power != _refState.EnemyPlayer.Power)
+            return false;
+        
+        //check tavern cards on board are the same up to a permutation
+        if (!AreListsPermutations<UniqueCard>(state.TavernAvailableCards, _refState.TavernAvailableCards))
+            return false;
+        
+        //check current player's hand is the same up to a permutation
+        if (!AreListsPermutations<UniqueCard>(state.CurrentPlayer.Hand, _refState.CurrentPlayer.Hand))
+            return false;
+        
+        //check played cards are the same up to a permutation
+        if (!(AreListsPermutations<UniqueCard>(state.CurrentPlayer.Played, _refState.CurrentPlayer.Played) 
+              && AreListsPermutations<UniqueCard>(state.EnemyPlayer.Played, _refState.EnemyPlayer.Played)))
+            return false;
+        
+        //check that known upcoming draws for the current player are the same (what are these? presumably current player
+        //does not know upcoming draws for enemy player)
+        if (!AreListsPermutations<UniqueCard>(state.CurrentPlayer.KnownUpcomingDraws, _refState.CurrentPlayer.KnownUpcomingDraws))
+            return false;
+        
+        //check agents on the board are the same for both players up to a permutation
+        if (!(AreListsPermutations<SerializedAgent>(state.CurrentPlayer.Agents, _refState.CurrentPlayer.Agents) 
+              && AreListsPermutations<SerializedAgent>(state.EnemyPlayer.Agents, _refState.EnemyPlayer.Agents)))
+            return false;
+        
+        //check identical patron status. So for the list of patron for this games we check that the favour status for
+        //each patron is the same between our states
+        foreach(PatronId id in state.Patrons)
+        {
+            if (state.PatronStates.All[id] != _refState.PatronStates.All[id])
+                return false;
+        }
+        
+        //if we survive all our tests return true
+        return true;
     }
     
     // Override Equals method to define equality
@@ -259,6 +342,18 @@ public class ISNode
         //return (this._refState, this._observingPlayer).GetHashCode();
         return 0;
     }
+    
+    //function to check if set of cards are the same up to ordering
+    public static bool AreListsPermutations<T>(List<T> list1, List<T> list2)
+    {
+        if (list1.Count != list2.Count)
+            return false;
+
+        var sortedList1 = list1.OrderBy(x => x).ToList();
+        var sortedList2 = list2.OrderBy(x => x).ToList();
+
+        return sortedList1.SequenceEqual(sortedList2);
+    }
 }
 
 //class to encapsulate links between ISNodes, these correspond to an action that can can be taken for the
@@ -275,58 +370,6 @@ public class ISAction
         this._endISNode = endNode;
     }
     
-    //check this action is compatible with a particular determinisation
-   // public bool CheckCompatibleAction(Determinisation d)
-   //{
-   //     //check state for determinisation d is contained within the starting ISNode
-   //     bool checkState = _startISNode.CheckEquivalentState(d.state);
-//
-//        //check that at least one of the compatible moves for our determinisation corresponds
-//        //to an edge that is in the equivalence class defined by this action
-//        bool checkMoves = false;
-//        foreach (Move move in d.moves)
-//        {
-//            var (newSeedGameState, newPossibleMoves) = d.state.ApplyMove(move);
-//            Edge edge = new Edge(d.state, newSeedGameState);
-//            if (this.CheckEquivalentEdge(edge))
-//            {
-//                checkMoves = true;/               break;
-// /          }
-//        }
-//
-//        if (checkState && checkMoves)
-//        {
-//            return true;
-//        }
-//        else
-//        {
-//            return false;
-//        }
-//    }
-    
-    //function to check if a given edge belong to the equivalence class defined by this action.
-    //Each edge is a link between two specific game states . Two edges are equivalent if:
-    //1. They do not belong to the same starting state (TODO: Why?, Also our ISNode has no specific starting state)
-    //2. Both edges have the same player about to start 
-    //3. The start info set is the same for both edges
-    //4. The end info set is the same for both edges
-    public bool CheckEquivalentEdge(Edge edge)
-    {
-        //check that the start info set is the same for both edges. To do this we can check that the
-        //starting game state in the edge belongs to the state equivalence class defined in the starting ISNode
-        //This also includes the check that both have the same player about to move
-        if (!_startISNode.CheckEquivalentState(edge._startState))
-        {
-            return false;
-        }
-        //check that the end info set is the same for both edges.
-        if (!_endISNode.CheckEquivalentState(edge._endState))
-        {
-            return false;
-        }
-        return true;
-    }
-    
     // Override Equals method to define equality
     public override bool Equals(object obj)
     {
@@ -338,18 +381,6 @@ public class ISAction
     public override int GetHashCode()
     {
         return (_startISNode, _endISNode).GetHashCode();
-    }
-}
-
-//this defines a specific move between two concrete game states 
-public class Edge
-{
-    public SeededGameState _startState;
-    public SeededGameState _endState;
-    public Edge(SeededGameState startState, SeededGameState endState)
-    {
-        this._startState = startState;
-        this._endState = endState;
     }
 }
 
