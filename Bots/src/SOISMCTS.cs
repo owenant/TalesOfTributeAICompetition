@@ -10,10 +10,9 @@ namespace Bots;
 //class to implement single observer information set monte carlo tree search
 public class SOISMCTS : AI
 {
-    //note the seed should be removed so that it is based off the system clock, once the code is working
     private TimeSpan _usedTimeInTurn = TimeSpan.FromSeconds(0);
     private TimeSpan _timeForMoveComputation = TimeSpan.FromSeconds(0.3);
-    private TimeSpan _TurnTimeout = TimeSpan.FromSeconds(10.0);
+    private TimeSpan _TurnTimeout = TimeSpan.FromSeconds(30.0);
     SeededRandom rng = new(123); //TODO: initialise using clock when code complete
 
     private void PrepareForGame()
@@ -38,7 +37,7 @@ public class SOISMCTS : AI
     {
         //we assume that the observing player is fixed for our game tree, and is the player controlled by our bot
         PlayerEnum observingPlayer = gameState.CurrentPlayer.PlayerID;
-        
+
         //Initialise a single node information set tree using the GameState object and list of possible moves. These can
         //then be used to generate a random determinisation (concrete state and legal moves pair) of the root information
         //set node on each iteration of the monte carlo loop. Note we include the possible moves list in our tree constructor
@@ -160,13 +159,13 @@ public class ISTree
     
     //get children of a node (which are info sets) compatible with a determinatisation d, which are contained in 
     //our tree (equivalent of c(v,d) in paper pseudo-code)
-    public HashSet<ISNode> GetCompatibleChildrenInTree(ISNode v, Determinisation d)
+    public List<ISNode> GetCompatibleChildrenInTree(ISNode v, Determinisation d)
     {
         //first we get compatible actions
-        HashSet<ISAction> compatibleActions = v.GetCompatibleActions(d);
+        List<ISAction> compatibleActions = v.GetCompatibleActions(d);
         
         //then for each action we check if the end node is in the tree or not
-        HashSet<ISNode> compatibleChildren = new HashSet<ISNode>();
+        List<ISNode> compatibleChildren = new List<ISNode>();
         foreach (ISAction action in compatibleActions)
         {
             if (_treeNodes.Contains(action._endISNode))
@@ -179,14 +178,14 @@ public class ISTree
     
     //get actions from a node v and determinisation d, for which v does not have children in the tree
     //equivalent to function u(v,d) in pseudo-code
-    public HashSet<ISAction> GetActionsWithNoTreeNodes(ISNode v, Determinisation d)
+    public List<ISAction> GetActionsWithNoTreeNodes(ISNode v, Determinisation d)
     {
         //generate all actions compatible with determinisation d
-        HashSet<ISAction> compatibleActions = v.GetCompatibleActions(d); //Note this is also run as part of c(v,d) which isnt very efficient
+        List<ISAction> compatibleActions = v.GetCompatibleActions(d); //Note this is also run as part of c(v,d) which isnt very efficient
         
         //then for each action that can be generated from d, check to see if that action is in our tree,
         //if not then add it out list of actions with no tree nodes
-        HashSet<ISAction> actionsWithNoTreeNode = new HashSet<ISAction>();
+        List<ISAction> actionsWithNoTreeNode = new List<ISAction>();
         foreach (ISAction action in compatibleActions)
         {
             if (!_treeActions.Contains(action))
@@ -212,152 +211,27 @@ public class ISTree
 }
 
 //Node for an ISTree, each node corresponds to an information set for the observing player for a tree
+//Note we do not implement a GetHashCode method for this object and hence it can not be stored as part of a HashSet.
+//The reason for this is that we would need to define a 'canonical reference state' for our equivalence class that could 
+//be hashed and lead to the same hash number across ISNodes instances which contain the same equivalence class. 
+//This would mean agreeing rules for ordering of all data items both hidden and non-hidden information. This is possible,
+//however ISNOdes are only used in the selection step of the MCTS algorithm, so the extent of the speed up coming from
+//the trade off of being able to do O(1) search on HashSets (as opposed ot O(N) on Lists) versus creating canonical
+//reference states is not clear. This maybe something to explore to optimise the execution time of this bot.
 public class ISNode
 {
-    //reference state, i.e. one instance of the set of equivalent states, however this will be in a 'canonical form'
-    //to support hash based searches 
+    //reference state, i.e. one instance of the set of equivalent states
     private SeededGameState _refState; //(do we need to change this to a determinisation and if so that isn't the equivalence class)
     private PlayerEnum _observingPlayer;
     
     //create a node using a reference state for the information set it encapsulates
     public ISNode(SeededGameState refState, PlayerEnum playerObserving)
     {
-        //in order to support hashing we convert the refState into a 'canonical state'. Hashing then speeds up
-        //searching for nodes
-        this._refState = ConvertToCanonical(refState);
+        this._refState = refState;
         this._observingPlayer = playerObserving;
     }
-
-    public SeededGameState ConvertToCanonical(SeededGameState state)
-    {
-        //we need to make sure that all elements of a game state have a well defined order (both for hidden and non-hidden information)
-        
-        //what happens if hidden information is different? ISNode should not care but GetHashCode will care....
-        //this is oK, just means we still need to define a function which correctly implements the equivalence relation
-        
-        
-        //we define a canonical state as one where all the elements of the seededGameSate are in a particualr order
-        //this needs to be true for both hidden and non-hidden information.
-        //note this does not change the legal moves for the state
-        //note this needs to be only done once when a tree node is constructed and this will then support all future search operations
-        //converting Contains() from O(n) to O(1) (via GetHashCode)
-        
-        //first we deal with information visible to the current player
-        
-        
-        //then for information that is hideen to the current player
-        
-        
-        return state;
-    }
-
+    
     //check if a state is part of the equivalence class for this node
-    public bool CheckEquivalentState(SeededGameState state)
-    {
-        //TODO: Does the equals function work ok for seeded game states?
-        return _refState.Equals(ConvertToCanonical(state));
-    }
-
-    //get actions available from info set, compatible with determinisation d. This is A(d) 
-    //in pseudo-code. 
-    public HashSet<ISAction> GetCompatibleActions(Determinisation d)
-    {
-        //first check that the game state in d is in our information set
-        HashSet<ISAction> compatibleActions = new HashSet<ISAction>();
-        if (!this.CheckEquivalentState(d.state))
-        {
-            //in this case return an empty set
-            return compatibleActions;
-        }
-        
-        //generate all possible states from d with the list of possible moves
-        List<SeededGameState> possibleStates = new List<SeededGameState>();
-        foreach (Move move in d.moves)
-        {
-            var (newSeedGameState, newPossibleMoves) = d.state.ApplyMove(move);
-            possibleStates.Add(newSeedGameState);
-        }
-        
-        //next for each possible new state compatible with our determinisation d we generate an ISNode and a
-        //corresponding action being careful not to duplicate.
-        foreach (SeededGameState state in possibleStates)
-        {
-            ISNode newNode = new ISNode(state, _observingPlayer);
-            ISAction newAction = new ISAction(this, newNode);
-
-            if (!compatibleActions.Contains(newAction))
-            {
-                compatibleActions.Add(newAction);
-            }
-        }
-
-        return compatibleActions;
-    }
-    
-    // Override Equals method to define equality
-    public override bool Equals(object obj)
-    {
-        ISNode node = (ISNode)obj;
-
-        //return (this.CheckEquivalentState(node._refState) && this._observingPlayer == node._observingPlayer);
-        //note the following is reliant on our refernce states being in a canonical form and therefore can be directly
-        //compared ot one another.
-        //TODO::Is the equals function OK to use on the SeededGameState object?
-        return (this._refState.Equals(node._refState) && this._observingPlayer == node._observingPlayer);
-    }
-
-    // Override GetHashCode method to ensure consistency with Equals
-    public override int GetHashCode()
-    {
-        //note this is reliant on our reference states for our nodes being converted into a canonical form
-        //so that _refState is the same for any two nodes with the same state equivalence classes
-        return (this._refState, this._observingPlayer).GetHashCode();
-    }
-}
-
-//class to encapsulate links between ISNodes, these correspond to an action that can can be taken for the
-//player to move from a starting information set to an end info set. Each action is an equivalence class of edges
-//so that many moves between states can correspond to a single action 
-public class ISAction
-{
-    public ISNode _startISNode;
-    public ISNode _endISNode;
-    
-    public ISAction(ISNode startNode, ISNode endNode)
-    {
-        this._startISNode = startNode;
-        this._endISNode = endNode;
-    }
-    
-    // Override Equals method to define equality
-    public override bool Equals(object obj)
-    {
-        ISAction action = (ISAction)obj;
-        return (_startISNode.Equals(action._startISNode) && _endISNode.Equals(action._endISNode));
-    }
-
-    // Override GetHashCode method to ensure consistency with Equals
-    public override int GetHashCode()
-    {
-        return (_startISNode, _endISNode).GetHashCode();
-    }
-}
-
-//struct to encapsulate a specific determinisation, which includes a concrete game state and compatible moves
-public struct Determinisation
-{
-    public SeededGameState state;
-    public List<Move> moves;
-
-    public Determinisation(SeededGameState gamestate, List<Move> compatibleMoves)
-    {
-        state = gamestate;
-        moves = compatibleMoves;
-    }
-}
-
-  /*//check whether or not a given state is in the equivalence set of states defined by this ISNode
-    //this is redudant due to moving to using a  canconical reference state....
     public bool CheckEquivalentState(SeededGameState state)
     {
         //to check whether two seeded states are in the same equivalence set we need to check that all the 
@@ -431,16 +305,97 @@ public struct Determinisation
         
         //if we survive all our tests return true
         return true;
-    }*/
+    }
     
-    // //function to check if set of cards are the same up to ordering
-    // public static bool AreListsPermutations<T>(List<T> list1, List<T> list2)
-    // {
-    //     if (list1.Count != list2.Count)
-    //         return false;
-    //
-    //     var sortedList1 = list1.OrderBy(x => x).ToList();
-    //     var sortedList2 = list2.OrderBy(x => x).ToList();
-    //
-    //     return sortedList1.SequenceEqual(sortedList2);
-    // }
+    //get actions available from info set, compatible with determinisation d. This is A(d) 
+    //in pseudo-code. 
+    public List<ISAction> GetCompatibleActions(Determinisation d)
+    {
+        //first check that the game state in d is in our information set
+        List<ISAction> compatibleActions = new List<ISAction>();
+        if (!this.CheckEquivalentState(d.state))
+        {
+            //in this case return an empty set
+            return compatibleActions;
+        }
+        
+        //generate all possible states from d with the list of possible moves
+        List<SeededGameState> possibleStates = new List<SeededGameState>();
+        foreach (Move move in d.moves)
+        {
+            var (newSeedGameState, newPossibleMoves) = d.state.ApplyMove(move);
+            possibleStates.Add(newSeedGameState);
+        }
+        
+        //next for each possible new state compatible with our determinisation d we generate an ISNode and a
+        //corresponding action being careful not to duplicate.
+        foreach (SeededGameState state in possibleStates)
+        {
+            ISNode newNode = new ISNode(state, _observingPlayer);
+            ISAction newAction = new ISAction(this, newNode);
+
+            if (!compatibleActions.Contains(newAction))
+            {
+                compatibleActions.Add(newAction);
+            }
+        }
+
+        return compatibleActions;
+    }
+    
+    // Override Equals method to define equality (this allows search on lists of ISNoes)
+    public override bool Equals(object obj)
+    {
+        ISNode node = (ISNode)obj;
+
+        return (this.CheckEquivalentState(node._refState) && this._observingPlayer == node._observingPlayer);
+    }
+
+    //function to check if set of cards are the same up to ordering
+    public static bool AreListsPermutations<T>(List<T> list1, List<T> list2)
+    {
+        if (list1.Count != list2.Count)
+             return false;
+    
+        var sortedList1 = list1.OrderBy(x => x).ToList();
+        var sortedList2 = list2.OrderBy(x => x).ToList();
+    
+        return sortedList1.SequenceEqual(sortedList2);
+    }
+}
+
+//class to encapsulate links between ISNodes, these correspond to an action that can can be taken for the
+//player to move from a starting information set to an end info set. Each action is an equivalence class of edges
+//so that many moves between states can correspond to a single action 
+public class ISAction
+{
+    public ISNode _startISNode;
+    public ISNode _endISNode;
+    
+    public ISAction(ISNode startNode, ISNode endNode)
+    {
+        this._startISNode = startNode;
+        this._endISNode = endNode;
+    }
+    
+    // Override Equals method to define equality (note we dont over-ride GetHashcode as we have not done this for 
+    //the ISNode object)
+    public override bool Equals(object obj)
+    {
+        ISAction action = (ISAction)obj;
+        return (_startISNode.Equals(action._startISNode) && _endISNode.Equals(action._endISNode));
+    }
+}
+
+//struct to encapsulate a specific determinisation, which includes a concrete game state and compatible moves
+public struct Determinisation
+{
+    public SeededGameState state;
+    public List<Move> moves;
+
+    public Determinisation(SeededGameState gamestate, List<Move> compatibleMoves)
+    {
+        state = gamestate;
+        moves = compatibleMoves;
+    }
+}
