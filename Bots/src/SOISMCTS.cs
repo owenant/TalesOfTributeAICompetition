@@ -1,3 +1,4 @@
+using System.Data.SqlTypes;
 using ScriptsOfTribute;
 using ScriptsOfTribute.AI;
 using ScriptsOfTribute.Board;
@@ -59,53 +60,65 @@ public class SOISMCTS : AI
         {
             //create a random determinisation from the tree root and store alongside root
             //information set node
-            InfosetNodeState nodeState = tree.GetRootDeterminisation();
+            InfosetNode rootNode = tree.GetRootDeterminisation();
             
-            //enter selection routine - return a node along with a determinisation 
-            Tuple<InfosetNodeState, List<InfosetActionState>> selectedNodeAndActionsNotInTree = select(tree, nodeState);
+            //enter selection routine - return a selected node ready to expand, along with a set of actions
+            //that have no nodes in in the tree
+            Tuple<InfosetNode, List<InfosetAction>, List<InfosetNode>> selectedNodeActionsNotInTreeAndPath = select(tree, rootNode);
             
             //if selected node has children not in the tree then expand the tree
-            InfosetNodeState expandedNodeState = selectedNodeAndActionsNotInTree.Item1;
-            if (selectedNodeAndActionsNotInTree.Item2.Count != 0)
+            InfosetNode selectedNode = selectedNodeActionsNotInTreeAndPath.Item1;
+            List<InfosetAction> actionsNotInTree = selectedNodeActionsNotInTreeAndPath.Item2;
+            List<InfosetNode> pathThroughTree =  selectedNodeActionsNotInTreeAndPath.Item3;
+            InfosetNode expandedNode = selectedNode;
+            if (actionsNotInTree.Count != 0)
             {
-                expandedNodeState = Expand(tree, selectedNodeAndActionsNotInTree);
+                expandedNode = Expand(tree, actionsNotInTree);
+                pathThroughTree.Add(expandedNode);
             }
             
             //next we simulate our playouts from our expanded node 
-            double payoutFromExpandedNode = Simulate(expandedNodeState.d);
+            double payoutFromExpandedNode = Simulate(expandedNode.GetDeterminisation());
             
             //finally we complete the backpropagation step
-            BackPropagation(tree, expandedNodeState.v, payoutFromExpandedNode);
+            BackPropagation(tree, payoutFromExpandedNode, pathThroughTree);
         }
         
         return possibleMoves.PickRandom(rng);
     }
     
-    //returns selected node to expand along with set of actions from selected node that dont have any chidren in the tree
-    public Tuple<InfosetNodeState, List<InfosetActionState>> select(InfosetTree tree, InfosetNodeState nodeState)
+    //returns the following:
+    // 1. selected node to expand
+    // 2. Set of actions from selected node that dont have any children in the tree (could be empty set if node is terminal)
+    // 3. The path taken down the tree from the root node to the final selected node 
+    public Tuple<InfosetNode, List<InfosetAction>, List<InfosetNode>> select(InfosetTree tree, InfosetNode startNode)
     { 
-        //descend our infoset tree (restricted to nodes/actions compatible with d) using our chosen tree policy
-        //until a node is reached such that some action from that node leads to
-        //an observing player information set that is not currently in the tree or the node v is terminal
-        InfosetNodeState bestNodeState = nodeState;
-        List<InfosetActionState> uvd = tree.GetActionsWithNoTreeNodes(bestNodeState);
-        
-        while (bestNodeState.d.state.GameEndState != null && uvd.Count == 0)
+        //descend our infoset tree (restricted to nodes/actions compatible with d associated with our node)
+        //using our chosen tree policy until a node is reached such that some action from that node leads to
+        //information set that is not currently in the tree or the node v is terminal
+        InfosetNode bestNode = startNode;
+        List<InfosetAction> uvd = tree.GetActionsWithNoTreeNodes(bestNode);
+
+        Determinisation visitingDeterminisation = bestNode.GetDeterminisation();
+        List<InfosetNode> pathThroughTree = new List<InfosetNode>();
+        while (visitingDeterminisation.state.GameEndState != null && uvd.Count == 0)
         {
-            List<InfosetNodeState> cvd = tree.GetCompatibleChildrenInTree(bestNodeState);
+            List<InfosetNode> cvd = tree.GetCompatibleChildrenInTree(bestNode);
             double bestVal = 0;
-            foreach(InfosetNodeState node in cvd)
+            foreach(InfosetNode node in cvd)
             {
-                double val = TreePolicy(node.v);
+                double val = TreePolicy(node);
                 if (val > bestVal)
                 {
                     bestVal = val;
-                    bestNodeState = node;
+                    bestNode = node;
                 }
             }
-            uvd = tree.GetActionsWithNoTreeNodes(bestNodeState);
+            uvd = tree.GetActionsWithNoTreeNodes(bestNode);
+            pathThroughTree.Add(bestNode);
+            visitingDeterminisation = bestNode.GetDeterminisation();
         }
-        return new Tuple<InfosetNodeState, List<InfosetActionState>>(bestNodeState, uvd);
+        return new Tuple<InfosetNode, List<InfosetAction>, List<InfosetNode>>(bestNode, uvd, pathThroughTree);
     }
 
     private double TreePolicy(InfosetNode node)
@@ -114,20 +127,20 @@ public class SOISMCTS : AI
     }
 
     //uvd is the set of actions from 
-    private InfosetNodeState Expand(InfosetTree tree, Tuple<InfosetNodeState, List<InfosetActionState>> nodeAndActionsNotInTree)
+    private InfosetNode Expand(InfosetTree tree, List<InfosetAction> actionsNotInTree)
     {
         //choose an acton at random from our actions not in the tree
         var random = new Random();
-        var randomIndex = random.Next(0, nodeAndActionsNotInTree.Item2.Count);
+        var randomIndex = random.Next(0, actionsNotInTree.Count);
         
         //add child node to tree
-        InfosetActionState actionState = nodeAndActionsNotInTree.Item2[randomIndex];
-        InfosetNode childNode = actionState.action._endInfosetNode;
+        InfosetAction action = actionsNotInTree[randomIndex];
+        InfosetNode childNode = action._endInfosetNode;
         tree.TreeNodes.Add(childNode);
-        tree.TreeActions.Add(actionState.action);
+        tree.TreeActions.Add(action);
         
-        //return new infosetNodeState object, corresponding to new child node plus determinisation
-        return new InfosetNodeState(childNode, actionState.d);
+        //return new infosetNode object, corresponding to new child containing the new determinisation
+        return childNode;
     }
 
     //simulate our game from a given determinisation (ignoring information sets)
@@ -156,11 +169,23 @@ public class SOISMCTS : AI
         return bestPlayoutScore;
     }
     
-    //function too backpropagate simulation pplayout results
-    private void BackPropagation(InfosetTree tree, InfosetNode playoutStartNode, double finalPayout)
+    //function too backpropagate simulation playout results
+    private void BackPropagation(InfosetTree tree, double finalPayout, List<InfosetNode> pathThroughTree)
     {
         //need to traverse tree from the playout start node back up to the root of the tree
-        
+        //note that our path through the tree should hold references to tree nodes and hence can be updated directly
+        //(program design could be improved here!)
+        foreach (InfosetNode node in pathThroughTree)
+        {
+            node.VisitCount += 1;
+            node.TotalReward += finalPayout;
+            node.AvailabilityCount += 1;
+            List<InfosetNode> children = tree.GetCompatibleChildrenInTree(node);
+            foreach (InfosetNode child in children)
+            {
+                child.AvailabilityCount += 1;
+            }
+        }
     }
 
     //heuristic used to choose each move in simulate function. Currently we choose moves that maximise prestige
@@ -198,10 +223,9 @@ public class InfosetTree
     //whose action it is in the current state that move our game from one state to the next
     public List<InfosetNode> TreeNodes;
     public List<InfosetAction> TreeActions;
-    public GameState RootGameState;
-    public List<Move> RootMovesList;
-    public PlayerEnum ObservingPlayer;
-    public InfosetNode RootNode;
+    private GameState _rootGameState;
+    private List<Move> _rootMovesList;
+    private InfosetNode _rootNode;
     private readonly SeededRandom _rng = new(123); //TODO: initialise using clock when code complete
     
     //constructor to initialise a tree with a root node using the current gameState as a reference state for the 
@@ -210,108 +234,117 @@ public class InfosetTree
     {
         TreeNodes = new List<InfosetNode>();
         TreeActions = new List<InfosetAction>();
-        RootGameState = refGameState;
-        RootMovesList = possibleMoves;
-        ObservingPlayer = observingPlayer;
+        _rootGameState = refGameState;
+        _rootMovesList = possibleMoves;
         
         //need to generate a reference state to set-up the root information set node (not this does not need to be
         //the same as the random determinisation from the start of each monet carlo iteration, but by definition should
-        //be an equivalent state
-        InfosetNodeState nodeState = GetRootDeterminisation();
-        RootNode = nodeState.v;
-        TreeNodes.Add(RootNode);
+        //be an equivalent state)
+        _rootNode = GetRootDeterminisation();
+        TreeNodes.Add(_rootNode);
     }
 
-    public InfosetNodeState GetRootDeterminisation()
+    public InfosetNode GetRootDeterminisation()
     {
-        SeededGameState s = RootGameState.ToSeededGameState((ulong) _rng.Next());
+        SeededGameState s = _rootGameState.ToSeededGameState((ulong) _rng.Next());
         
         //note that the root moves list contains the legal moves for the current player in our seeded game state
         //(the randomisation only affects hidden information and the current player can see his cards, and the list of possible moves
         //is based off the current players hand)
-        Determinisation d = new Determinisation(s, RootMovesList);
+        Determinisation d = new Determinisation(s, _rootMovesList);
         
-        //note this next step isnt strictly necessary, but might be abit less confusing that the
-       // reference state for the root equivalence class is set to be equal to the determinisation
-       //used during the monte carlo loop
-       RootNode = new InfosetNode(d.state, ObservingPlayer);
-       
-       return new InfosetNodeState(RootNode, d);
+        //need to update the visiting determinisation for the root node
+        _rootNode.SetDeterminisation(d);
+        
+        return _rootNode;
     }
     
-    //get children of a node (which are info sets) compatible with a given determinisation, which are contained in 
-    //our tree (equivalent of c(v,d) in paper pseudo-code)
-    public List<InfosetNodeState> GetCompatibleChildrenInTree(InfosetNodeState nodeState)
+    //get children of a node (which are info sets) compatible with the visiting determinisation for the node,
+    //which are contained in our tree (equivalent of c(v,d) in paper pseudo-code)
+    public List<InfosetNode> GetCompatibleChildrenInTree(InfosetNode node)
     {
-        //first we get compatible actions
-        List<InfosetActionState> compatibleActions = nodeState.v.GetCompatibleActions(nodeState.d);
+        //first we get compatible actions - using the determinisation associated with the node
+        List<InfosetAction> compatibleActions = node.GetCompatibleActions();
         
         //then for each action we check if the end node is in the tree or not
-        List<InfosetNodeState> compatibleChildren = new List<InfosetNodeState>();
-        foreach (InfosetActionState actionState in compatibleActions)
+        List<InfosetNode> compatibleChildren = new List<InfosetNode>();
+        foreach (InfosetAction action in compatibleActions)
         {
-            if (TreeNodes.Contains(actionState.action._endInfosetNode))
+            int index = TreeNodes.IndexOf(action._endInfosetNode);
+            if (index >= 0)
             {
-                compatibleChildren.Add(new InfosetNodeState(actionState.action._endInfosetNode, actionState.d));
+                compatibleChildren.Add(TreeNodes[index]);
             }
         }
         return compatibleChildren;
     }
     
-    //get actions from a node v and determinisation d, for which v does not have children in the tree
-    //equivalent to function u(v,d) in pseudo-code
-    public List<InfosetActionState> GetActionsWithNoTreeNodes(InfosetNodeState nodeState)
+    //get actions from a node v and determinisation d (associated with the node), for which v does not have children
+    //in the tree equivalent to function u(v,d) in pseudo-code
+    public List<InfosetAction> GetActionsWithNoTreeNodes(InfosetNode node)
     {
         //first we get compatible actions
-        List<InfosetActionState> compatibleActions = nodeState.v.GetCompatibleActions(nodeState.d);
+        List<InfosetAction> compatibleActions = node.GetCompatibleActions();
 
         //then for each action that can be generated from d, check to see if that action is in our tree,
         //if not then add it out list of actions with no tree nodes
-        List<InfosetActionState> actionsWithNoTreeNode = new List<InfosetActionState>();
-        foreach (InfosetActionState actionState in compatibleActions)
+        List<InfosetAction> actionsWithNoTreeNode = new List<InfosetAction>();
+        foreach (InfosetAction action in compatibleActions)
         {
-            if (!TreeActions.Contains(actionState.action))
+            int index = TreeActions.IndexOf(action);
+            if (index < 0)
             {
-                actionsWithNoTreeNode.Add(new InfosetActionState(actionState.action,actionState.d));
+                actionsWithNoTreeNode.Add(action);
             }
         }
         return actionsWithNoTreeNode;
     }
 }
 
-//Node for an InfosetTree, each node corresponds to an information set for the observing player for a tree
-//Note we do not implement a GetHashCode method for this object and hence it can not be stored as part of a HashSet.
-//The reason for this is that we would need to define a 'canonical reference state' for our equivalence class that could 
-//be hashed and lead to the same hash number across InfosetNodes instances which contain the same equivalence class. 
-//This would mean agreeing rules for ordering of all data items both hidden and non-hidden information. This is possible,
-//however InfosetNodes are only used in the selection step of the MCTS algorithm, so the extent of the speed up coming from
-//the trade off of being able to do O(1) search on HashSets (as opposed ot O(N) on Lists) versus creating canonical
-//reference states is not clear. This maybe something to explore to optimise the execution time of this bot.
+//Node for an InfosetTree, each node corresponds to an information set for the observing player for a tree,
+//and also contains the determinisation that was used when the node was last visited in the tree 
 public class InfosetNode
 {
-    //reference state, i.e. one instance of the set of equivalent states
-    private SeededGameState _refState; //(do we need to change this to a determinisation and if so that isn't the equivalence class)
-    private PlayerEnum _observingPlayer;
-    private double _totalReward;
-    private double _visitCount;
-    private double _availabilityCount;
+    private SeededGameState _refState; //reference state, i.e. one instance of the set of equivalent states for this node
+    private Determinisation _visitingDeterminisation; //to store determinisation that was used when this node was last visited in the tree
+    public double TotalReward;
+    public double VisitCount;
+    public double AvailabilityCount;
+    public static bool NodeErrorCheck = true;
     
-    //create a node using a reference state for the information set it encapsulates
-    public InfosetNode(SeededGameState refState, PlayerEnum playerObserving)
+    //create a node using a reference determinisation for information set it encapsulates
+    public InfosetNode(Determinisation d)
     {
-        this._refState = refState;
-        this._observingPlayer = playerObserving;
+        _refState = d.state;
+        _visitingDeterminisation = d;
         
         //initialise values for UCB calc
-        _totalReward = 0.0001;
-        _visitCount = 1;
-        _availabilityCount = 1;
+        TotalReward = 0.0001;
+        VisitCount = 1;
+        AvailabilityCount = 1;
+    }
+
+    public void SetDeterminisation(Determinisation d)
+    {
+        //the way the MCTS algorithm is set-up this check should never be needed...
+        if (NodeErrorCheck)
+        {
+            if (!CheckEquivalentState(d.state))
+                throw new Exception("Determinisation incompatible with reference state in InfosetNode: SetDeterminisation");
+        }
+
+        _visitingDeterminisation = d;
+    }
+
+    public Determinisation GetDeterminisation()
+    {
+        return _visitingDeterminisation;
     }
 
     //calculate upper confidence bound for trees, bandit algorithm for MCTS tree policy
     public double UCB(double K)
     {
-        return _totalReward / _visitCount + K * Math.Sqrt(Math.Log(_availabilityCount / _totalReward));
+        return TotalReward / VisitCount + K * Math.Sqrt(Math.Log(AvailabilityCount / TotalReward));
     }
     
     //check if a state is part of the equivalence class for this node
@@ -405,14 +438,14 @@ public class InfosetNode
         return true;
     }
     
-    //get actions available from info set, compatible with a determinisation d.This is A(d) in pseudo-code. 
-    public List<InfosetActionState> GetCompatibleActions(Determinisation d)
+    //get actions available from info set using our visiting determinisation.This is A(d) in pseudo-code. 
+    public List<InfosetAction> GetCompatibleActions()
     {
         //generate all possible determinisations from d with the list of possible moves
         List<Determinisation> possibleDeterminisations = new List<Determinisation>();
-        foreach (Move move in d.moves)
+        foreach (Move move in _visitingDeterminisation.moves)
         {
-            var (newSeedGameState, newPossibleMoves) = d.state.ApplyMove(move);
+            var (newSeedGameState, newPossibleMoves) = _visitingDeterminisation.state.ApplyMove(move);
             Determinisation dNew = new Determinisation(newSeedGameState, newPossibleMoves);
             
             possibleDeterminisations.Add(dNew);
@@ -421,20 +454,17 @@ public class InfosetNode
         //next for each possible new state compatible with our determinisation d we generate an InfosetNode and a
         //corresponding action being careful not to duplicate.
         List<InfosetAction> compatibleActions = new List<InfosetAction>();
-        List<InfosetActionState> compatibleActionStates = new List<InfosetActionState>();
-        foreach (Determinisation dNew  in possibleDeterminisations)
+        foreach (Determinisation dNew in possibleDeterminisations)
         {
-            InfosetNode newNode = new InfosetNode(dNew.state, _observingPlayer);
+            InfosetNode newNode = new InfosetNode(dNew);
             InfosetAction newAction = new InfosetAction(this, newNode);
             if (!compatibleActions.Contains(newAction))
             {
-                InfosetActionState newActionState = new InfosetActionState(newAction, dNew);
                 compatibleActions.Add(newAction);
-                compatibleActionStates.Add(newActionState);
             }
         }
 
-        return compatibleActionStates;
+        return compatibleActions;
     }
     
     // Override Equals method to define equality (this allows search on lists of InfosetNodes)
@@ -442,7 +472,7 @@ public class InfosetNode
     {
         InfosetNode node = (InfosetNode)obj;
         
-        return (this.CheckEquivalentState(node._refState) && this._observingPlayer == node._observingPlayer);
+        return CheckEquivalentState(node._refState);
     }
 
     //function to check if set of cards are the same up to ordering 
@@ -497,31 +527,3 @@ public struct Determinisation
     }
 }
 
-//we also use a struct to manage a pair consisting of an infosetnode and a determinisation
-//this is used as we trace down the tree using a particular root determinisation (and it's
-//descendent)
-public struct InfosetNodeState
-{
-    public InfosetNode v;
-    public Determinisation d;
-
-    public InfosetNodeState(InfosetNode node, Determinisation deter)
-    {
-        v = node;
-        d = deter;
-    }
-}
-
-//similarly we define an action determinisation pair, where the determinisation corresponds to the
-//determinisation of the final node of the action
-public struct InfosetActionState
-{
-    public InfosetAction action;
-    public Determinisation d;
-
-    public InfosetActionState(InfosetAction infosetaction, Determinisation deter)
-    {
-        action = infosetaction;
-        d = deter;
-    }
-}
