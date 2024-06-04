@@ -3,6 +3,8 @@ using ScriptsOfTribute.AI;
 using ScriptsOfTribute.Board;
 using ScriptsOfTribute.Serializers;
 using System.Diagnostics;
+using System.Dynamic;
+using System.Runtime;
 using ScriptsOfTribute.Board.Cards;
 
 namespace Bots;
@@ -14,6 +16,9 @@ public class SOISMCTS : AI
     private readonly TimeSpan _timeForMoveComputation = TimeSpan.FromSeconds(0.3);
     private readonly TimeSpan _TurnTimeout = TimeSpan.FromSeconds(30.0);
     private readonly SeededRandom rng = new(123); //TODO: initialise using clock when code complete
+    
+    //parameters for MCTS
+    private readonly double K = 1.0; //explore vs exploit parameter for tree policy
 
     private void PrepareForGame()
     { 
@@ -57,13 +62,27 @@ public class SOISMCTS : AI
             InfosetNodeState nodeState = tree.GetRootDeterminisation();
             
             //enter selection routine - return a node along with a determinisation 
-            InfosetNodeState selectedNode = select(tree, nodeState);
+            Tuple<InfosetNodeState, List<InfosetActionState>> selectedNodeAndActionsNotInTree = select(tree, nodeState);
+            
+            //if selected node has children not in the tree then expand the tree
+            InfosetNodeState expandedNodeState = selectedNodeAndActionsNotInTree.Item1;
+            if (selectedNodeAndActionsNotInTree.Item2.Count != 0)
+            {
+                expandedNodeState = Expand(tree, selectedNodeAndActionsNotInTree);
+            }
+            
+            //next we simulate our playouts from our expanded node 
+            double payoutFromExpandedNode = Simulate(expandedNodeState.d);
+            
+            //finally we complete the backpropagation step
+            BackPropagation(tree, expandedNodeState.v, payoutFromExpandedNode);
         }
         
         return possibleMoves.PickRandom(rng);
     }
     
-    public InfosetNodeState select(InfosetTree tree, InfosetNodeState nodeState)
+    //returns selected node to expand along with set of actions from selected node that dont have any chidren in the tree
+    public Tuple<InfosetNodeState, List<InfosetActionState>> select(InfosetTree tree, InfosetNodeState nodeState)
     { 
         //descend our infoset tree (restricted to nodes/actions compatible with d) using our chosen tree policy
         //until a node is reached such that some action from that node leads to
@@ -86,13 +105,83 @@ public class SOISMCTS : AI
             }
             uvd = tree.GetActionsWithNoTreeNodes(bestNodeState);
         }
-        return bestNodeState;
+        return new Tuple<InfosetNodeState, List<InfosetActionState>>(bestNodeState, uvd);
     }
 
     private double TreePolicy(InfosetNode node)
     {
+        return node.UCB(K);
+    }
+
+    //uvd is the set of actions from 
+    private InfosetNodeState Expand(InfosetTree tree, Tuple<InfosetNodeState, List<InfosetActionState>> nodeAndActionsNotInTree)
+    {
+        //choose an acton at random from our actions not in the tree
+        var random = new Random();
+        var randomIndex = random.Next(0, nodeAndActionsNotInTree.Item2.Count);
         
-        return 0;
+        //add child node to tree
+        InfosetActionState actionState = nodeAndActionsNotInTree.Item2[randomIndex];
+        InfosetNode childNode = actionState.action._endInfosetNode;
+        tree.TreeNodes.Add(childNode);
+        tree.TreeActions.Add(actionState.action);
+        
+        //return new infosetNodeState object, corresponding to new child node plus determinisation
+        return new InfosetNodeState(childNode, actionState.d);
+    }
+
+    //simulate our game from a given determinisation (ignoring information sets)
+    private double Simulate(Determinisation d0)
+    {
+        Determinisation d = d0;
+        double bestPlayoutScore = 0;
+        while (d.state.GameEndState != null)
+        {
+            double playoutScore = 0;
+            bestPlayoutScore = 0;
+            Determinisation bestd = d;
+            foreach(Move move in d.moves)
+            {
+                var (newSeededGameState, newPossibleMoves) = d.state.ApplyMove(move);
+                playoutScore = playoutHeuristic(newSeededGameState);
+                if (playoutScore > bestPlayoutScore)
+                {
+                    bestPlayoutScore = playoutScore;
+                    bestd = new Determinisation(newSeededGameState, newPossibleMoves);
+                }
+            }
+            d = bestd;
+        }
+
+        return bestPlayoutScore;
+    }
+    
+    //function too backpropagate simulation pplayout results
+    private void BackPropagation(InfosetTree tree, InfosetNode playoutStartNode, double finalPayout)
+    {
+        //need to traverse tree from the playout start node back up to the root of the tree
+        
+    }
+
+    //heuristic used to choose each move in simulate function. Currently we choose moves that maximise prestige
+    private double playoutHeuristic(SeededGameState state)
+    {
+        double prestige = state.CurrentPlayer.Prestige;
+        if (state.GameEndState != null)
+        {
+            if (state.GameEndState.Winner == state.CurrentPlayer.PlayerID)
+            {
+                return prestige * 1.5;
+            }
+            else
+            {
+                return prestige * 0.5;
+            }
+        }
+        else
+        {
+            return prestige;
+        }
     }
 
     public override void GameEnd(EndGameState state, FullGameState? finalBoardState)
@@ -203,12 +292,26 @@ public class InfosetNode
     //reference state, i.e. one instance of the set of equivalent states
     private SeededGameState _refState; //(do we need to change this to a determinisation and if so that isn't the equivalence class)
     private PlayerEnum _observingPlayer;
+    private double _totalReward;
+    private double _visitCount;
+    private double _availabilityCount;
     
     //create a node using a reference state for the information set it encapsulates
     public InfosetNode(SeededGameState refState, PlayerEnum playerObserving)
     {
         this._refState = refState;
         this._observingPlayer = playerObserving;
+        
+        //initialise values for UCB calc
+        _totalReward = 0.0001;
+        _visitCount = 1;
+        _availabilityCount = 1;
+    }
+
+    //calculate upper confidence bound for trees, bandit algorithm for MCTS tree policy
+    public double UCB(double K)
+    {
+        return _totalReward / _visitCount + K * Math.Sqrt(Math.Log(_availabilityCount / _totalReward));
     }
     
     //check if a state is part of the equivalence class for this node
