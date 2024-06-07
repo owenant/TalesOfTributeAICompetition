@@ -7,6 +7,7 @@ using System.Diagnostics;
 using System.Dynamic;
 using System.Runtime;
 using ScriptsOfTribute.Board.Cards;
+using ScriptsOfTribute.utils;
 
 namespace Bots;
 
@@ -17,6 +18,7 @@ public class SOISMCTS : AI
     //private readonly TimeSpan _timeForMoveComputation = TimeSpan.FromSeconds(0.3);
     //private readonly TimeSpan _TurnTimeout = TimeSpan.FromSeconds(30.0);
     private SeededRandom rng; 
+    private Logger log; 
     
     //counter for number of times play method is called
     private int playMethodCallCount = 0;
@@ -24,13 +26,21 @@ public class SOISMCTS : AI
     //parameters for MCTS
     private readonly double K = 1.0; //explore vs exploit parameter for tree policy
 
+    public static bool errorcheck = false;
+    
     private void PrepareForGame()
     { 
         //if any agent set-up needed it can be done here
         
         //seed random number generator
-        rng = new(123);  //TODO: initialise using clock when code complete
+        long seed = DateTime.Now.Ticks;
+        //rng = new(123);  //TODO: initialise using clock when code complete
+        rng = new((ulong)seed); 
         
+        //create logger object
+        log = new Logger();
+        log.P1LoggerEnabled = true;
+
         //TODO: can we initialise and store a static tree object so that we can re-use the tree from 
         //move to move
     }
@@ -63,13 +73,13 @@ public class SOISMCTS : AI
         s.Start();
         //temporarily use number of iterations whilst debugging
         //while (s.Elapsed < _timeForMoveComputation)
-        int maxIterations = 1;
+        int maxIterations = 25;
         int noIterations = 1;
-        
-        if (playMethodCallCount == 39)
-        {
-            int i = 0;
-        }
+
+        // if (playMethodCallCount == 12)
+        // {
+        //     errorcheck = true;
+        // }
         while(noIterations <= maxIterations)
         {
             //create a random determinisation from the tree root and store alongside root
@@ -102,10 +112,21 @@ public class SOISMCTS : AI
         
         //finally we return the move from the root node that leads to a node with the maximum visit count
         Move chosenMove = chooseBestMove(tree);
-
+        
+        //output log message to track progress
+        s.Stop();
+        TimeSpan ts = s.Elapsed;
+        
+        // // Format and display the elapsed time
+        // string elapsedTime = String.Format("{0:00}:{1:00}:{2:00}.{3:00}",
+        //     ts.Hours, ts.Minutes, ts.Seconds,
+        //     ts.Milliseconds / 10);
+        //
+        // string message = "Play method call count: " + playMethodCallCount.ToString() +" Time Elapsed: " + elapsedTime;
+        // log.Log(gameState.CurrentPlayer.PlayerID, message);
+        
         if (chosenMove is null)
         {
-            int i = 0;
             Move chosenMoveTest = Play(gameState, possibleMoves, remainingTime);
         }
         return chosenMove;
@@ -148,7 +169,8 @@ public class SOISMCTS : AI
 
     private double TreePolicy(InfosetNode node)
     {
-        return node.UCB(K);
+        double nodeUCB = node.UCB(K);
+        return nodeUCB;
     }
 
     //uvd is the set of actions from 
@@ -157,11 +179,11 @@ public class SOISMCTS : AI
         //choose an acton at random from our actions not in the tree and add child node to tree
         InfosetAction action = actionsNotInTree.PickRandom(rng); 
         //check startnode is in tree
-        int index = tree.TreeNodes.IndexOf(action._startInfosetNode);
-        if (index < 0)
-        {
-            throw new Exception("This shouldn't happen!");
-        }
+        //int index = tree.TreeNodes.IndexOf(action._startInfosetNode);
+        //if (index < 0)
+        //{
+        //    throw new Exception("This shouldn't happen!");
+       // }
         InfosetNode childNode = action._endInfosetNode;
         tree.TreeNodes.Add(childNode);
         tree.TreeActions.Add(action);
@@ -173,6 +195,7 @@ public class SOISMCTS : AI
     //simulate our game from a given determinisation (ignoring information sets)
     private double Simulate(Determinisation d0)
     {
+        int Count = 0;
         Determinisation d = d0;
         double bestPlayoutScore = 0;
         double eps = 0.0001; //used to check for equality on playout scores betwwen nodes
@@ -180,24 +203,24 @@ public class SOISMCTS : AI
         {
             //create all legal next states 
             List<Determinisation> possibleDeterminisations = new List<Determinisation>();
-            foreach(Move move in d.moves)
+            foreach (Move move in d.moves)
             {
                 var (newSeededGameState, newPossibleMoves) = d.state.ApplyMove(move);
                 possibleDeterminisations.Add(new Determinisation(newSeededGameState, newPossibleMoves));
             }
-            
+
             //take first move from the list, use asa  reference to capture the case where all payouts are equal for
             //the next nodes
             Determinisation bestd = possibleDeterminisations[0];
             double playoutScore = playoutHeuristic(bestd.state);
             double firstPlayoutScore = playoutScore;
             bestPlayoutScore = firstPlayoutScore;
-            
+
             bool allequal = true;
-            for (var i = 1; i < possibleDeterminisations.Count; i++)//ignore the first move in this loop 
+            for (var i = 1; i < possibleDeterminisations.Count; i++) //ignore the first move in this loop 
             {
                 playoutScore = playoutHeuristic(possibleDeterminisations[i].state);
-                if (! (playoutScore < (firstPlayoutScore + eps) && playoutScore > (firstPlayoutScore - eps)))
+                if (!(playoutScore < (firstPlayoutScore + eps) && playoutScore > (firstPlayoutScore - eps)))
                 {
                     allequal = false;
                     if (playoutScore > bestPlayoutScore)
@@ -205,14 +228,23 @@ public class SOISMCTS : AI
                         bestPlayoutScore = playoutScore;
                         bestd = possibleDeterminisations[i];
                     }
-                } 
+                }
             }
+
             //if all nodes have teh same playout score chose one at random
             if (allequal)
-            { 
-                bestd = possibleDeterminisations.PickRandom(rng); 
+            {
+                bestd = possibleDeterminisations.PickRandom(rng);
             }
+
             d = bestd;
+            Count += 1;
+            if (Count >= 20000)
+            {
+                //seem to be stuck in infinite loop unable to find am end of game state, in which case just return
+                //bext value found so far (hopefully this wont be an issue when MCTS play better and seeding from the system clock....)
+                return bestPlayoutScore;
+            }
         }
 
         return bestPlayoutScore;
@@ -246,14 +278,15 @@ public class SOISMCTS : AI
         Determinisation rootDeterminisation = tree.RootNode.GetDeterminisation();
         
         //test
-        if (rootDeterminisation.moves.Count == 6)
-        {
-            var (newSeedGameState, newPossibleMoves) =
-                rootDeterminisation.state.ApplyMove(rootDeterminisation.moves[5]);
-            Determinisation dNew = new Determinisation(newSeedGameState, newPossibleMoves);
-            InfosetNode endNode = new InfosetNode(dNew);
-            bool test = (tree.TreeNodes[1].Equals(endNode));
-        }
+        // int indexOfMoveToTest = 2;
+        // if (rootDeterminisation.moves.Count > indexOfMoveToTest)
+        // {
+        //     var (newSeedGameState, newPossibleMoves) =
+        //         rootDeterminisation.state.ApplyMove(rootDeterminisation.moves[indexOfMoveToTest]);
+        //     Determinisation dNew = new Determinisation(newSeedGameState, newPossibleMoves);
+        //     InfosetNode endNode = new InfosetNode(dNew);
+        //     bool test = (tree.TreeNodes[1].Equals(endNode));
+        // }
 
         foreach (Move move in rootDeterminisation.moves)
         {
@@ -434,7 +467,9 @@ public class InfosetNode
     //calculate upper confidence bound for trees, bandit algorithm for MCTS tree policy
     public double UCB(double K)
     {
-        return TotalReward / VisitCount + K * Math.Sqrt(Math.Log(AvailabilityCount / TotalReward));
+        double normalisedReward = TotalReward / 80.0; //80 is the upper limit for a tie break
+        double ucbVal = normalisedReward / (VisitCount * 1.0) + K * Math.Sqrt(Math.Log((AvailabilityCount * 1.0) / (VisitCount * 1.0) ));
+        return ucbVal;
     }
     
     //check if a state is part of the equivalence class for this node
@@ -498,8 +533,8 @@ public class InfosetNode
         //not had their Equals operation over-ridden and we cant use the default operator as it just check memory address
         //and we will want to say two instances of the same agent are the same (if they belong to the same player)
         //so we use a specific function for this check
-        if (!(AreAgentListsPermutations(state.CurrentPlayer.Agents, _refState.CurrentPlayer.Agents) 
-              && AreAgentListsPermutations(state.EnemyPlayer.Agents, _refState.EnemyPlayer.Agents)))
+        if (!(BespokePermutationsCheck<SerializedAgent>(state.CurrentPlayer.Agents, _refState.CurrentPlayer.Agents) 
+              && BespokePermutationsCheck<SerializedAgent>(state.EnemyPlayer.Agents, _refState.EnemyPlayer.Agents)))
             return false;
         
         //The current player will know what is in the cooldown pile both for himself and the enemy as he will have observed
@@ -515,11 +550,18 @@ public class InfosetNode
         if(!(AreListsPermutations<UniqueBaseEffect>(state.StartOfNextTurnEffects, _refState.StartOfNextTurnEffects)))
             return false;
 
-        //check pending choices
+        //check pending choices (not sure we need this if all played cards are the same)
         if (state.PendingChoice != null && _refState.PendingChoice != null)
         {
-            if (!(state.PendingChoice.Equals(_refState.PendingChoice))) 
+            if (state.PendingChoice.Type != _refState.PendingChoice.Type)
                 return false;
+
+            if (state.PendingChoice.Type == Choice.DataType.EFFECT)
+            {
+                if (!BespokePermutationsCheck<UniqueEffect>(state.PendingChoice.PossibleEffects,
+                        _refState.PendingChoice.PossibleEffects))
+                    return false;
+            }
         }
         else
         {
@@ -534,22 +576,8 @@ public class InfosetNode
         }
         
         //check end game state. 
-        if (state.GameEndState != null && _refState.GameEndState != null)
-        {
-            if (!(state.GameEndState.Equals(_refState.GameEndState))) 
-                return false;
-        }
-        else
-        {
-            if (state.GameEndState == null && _refState.GameEndState != null)
-            {
-                return false;
-            }
-            else if (state.GameEndState != null && _refState.GameEndState == null)
-            {
-                return false;
-            }
-        }
+        if (!EqualsGameEndState(state.GameEndState, _refState.GameEndState))
+            return false;
         
         //TODO: what is a patron call?
         if (state.CurrentPlayer.PatronCalls != _refState.CurrentPlayer.PatronCalls)
@@ -612,8 +640,9 @@ public class InfosetNode
     
         return sortedList1.SequenceEqual(sortedList2);
     }
-
-    public static bool AreAgentListsPermutations(List<SerializedAgent> list1, List<SerializedAgent> list2)
+    
+    //move careful permutation check where we are in control of equals funciton
+    public bool BespokePermutationsCheck<T>(List<T> list1, List<T> list2)
     {
         if (list1.Count != list2.Count)
             return false;
@@ -622,15 +651,11 @@ public class InfosetNode
         List<bool> used = Enumerable.Repeat(false, list2.Count).ToList();
         for(int index1 = 0;  index1 < list1.Count; index1++)
         {
-            SerializedAgent agent1 = list1[index1];
             for(int index2 = 0;  index2 < list2.Count; index2++)
             {
-                //check if agent1 and agent2 are the same
-                SerializedAgent agent2 = list2[index2];
                 if (used[index2] == false)
                 {
-                    if (agent1.RepresentingCard.Equals(agent2.RepresentingCard) && agent1.Activated == agent2.Activated
-                        && agent1.CurrentHp == agent2.CurrentHp)
+                    if (EqualsOverride(list1[index1], list2[index2]))
                     {
                         match[index1] = true;
                         used[index2] = true;
@@ -640,6 +665,61 @@ public class InfosetNode
             }
         }
         return (match.All(b => b) && used.All(b => b));
+    }
+
+    public bool EqualsOverride<T>(T item1, T item2)
+    {
+        if ((item1 is SerializedAgent) && (item2 is SerializedAgent))
+        {
+            return EqualsAgent(item1 as SerializedAgent, item2 as SerializedAgent);
+        }
+        else if ((item1 is UniqueEffect) && (item2 is UniqueEffect))
+        {
+            return EqualsEffect(item1 as UniqueEffect, item2 as UniqueEffect);
+        }
+        else
+        {
+            throw new Exception("Invalid use  of EqualsOverride");
+        }
+    }
+    
+    //we need function to define equality between Agents, Pending choices and GameEndState as these are not provided by game engine
+    //and not over-ridden in their respective classes
+    private bool EqualsAgent(SerializedAgent agent1, SerializedAgent agent2)
+    {
+        return (agent1.RepresentingCard.Equals(agent2.RepresentingCard) && agent1.Activated == agent2.Activated
+                                                                        && agent1.CurrentHp == agent2.CurrentHp);
+    }
+
+    private bool EqualsEffect(UniqueEffect effect1, UniqueEffect effect2)
+    {
+        //this is abit of a lazy test, but should be good enough
+        if (effect1.Amount != effect2.Amount && effect1.Type != effect2.Type)
+            return false;
+
+        return true;
+    }
+
+    private bool EqualsGameEndState(EndGameState? state1, EndGameState? state2)
+    {
+        if (state1 != null && state2 != null)
+        {
+            if (!(state1.Winner == state2.Winner && state1.Reason == state2.Reason))
+                return false;
+        }
+        else
+        {
+            if (state1 == null && state2 != null)
+            {
+                return false;
+            }
+            else if (state1 != null && state2 == null)
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 }
 
