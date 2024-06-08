@@ -14,17 +14,22 @@ namespace Bots;
 //class to implement single observer information set monte carlo tree search
 public class SOISMCTS : AI
 {
-    //private TimeSpan _usedTimeInTurn = TimeSpan.FromSeconds(0);
-    //private readonly TimeSpan _timeForMoveComputation = TimeSpan.FromSeconds(0.3);
-    //private readonly TimeSpan _TurnTimeout = TimeSpan.FromSeconds(30.0);
+    private TimeSpan _usedTimeInTurn = TimeSpan.FromSeconds(0);
+    private TimeSpan _timeForMoveComputation = TimeSpan.FromSeconds(0.3);
+    private readonly TimeSpan _turnTimeout = TimeSpan.FromSeconds(29.9);
+    private bool _startOfTurn = true;
     private SeededRandom rng; 
-    private Logger log; 
+    private Logger log;
+    private int _simsCounter; // total number of MCTS simulations for a game
+    private int _turnCounter; // total number of turns for a game
+    private int _moveCounter; // total number of moves for a game
     
     //counter for number of times play method is called
     private int playMethodCallCount = 0;
     
     //parameters for MCTS
     private readonly double K = 1.0; //explore vs exploit parameter for tree policy
+    private readonly int maxSimulationDepth = 2; //only explore current player and next player response
 
     public static bool errorcheck = false;
     
@@ -40,6 +45,15 @@ public class SOISMCTS : AI
         //create logger object
         log = new Logger();
         log.P1LoggerEnabled = true;
+        log.P2LoggerEnabled = true;
+        
+        //initialise start of turn bool
+        _startOfTurn = true;
+        
+        //initialise counters
+        _turnCounter = 0;
+        _moveCounter = 0;
+        _simsCounter = 0;
 
         //TODO: can we initialise and store a static tree object so that we can re-use the tree from 
         //move to move
@@ -57,8 +71,13 @@ public class SOISMCTS : AI
 
     public override Move Play(GameState gameState, List<Move> possibleMoves, TimeSpan remainingTime)
     {
-        playMethodCallCount += 1;
-        
+        //playMethodCallCount += 1;
+        if (_startOfTurn)
+        {
+            _startOfTurn = false;
+            _usedTimeInTurn = TimeSpan.FromSeconds(0);
+        }
+
         //Initialise a single node information set tree using the GameState object and list of possible moves. These can
         //then be used to generate a random determinisation (concrete state and legal moves pair) of the root information
         //set node on each iteration of the monte carlo loop. Note we include the possible moves list in our tree constructor
@@ -69,66 +88,92 @@ public class SOISMCTS : AI
         //in InfosetMCTS each iteration of the loop starts with a new determinisation we use to explore the SAME tree
         //updating the stats for each tree node (which are information sets as seen by a chosen observer, in our
         //case our bot)
-        Stopwatch s = new Stopwatch();
-        s.Start();
         //temporarily use number of iterations whilst debugging
-        //while (s.Elapsed < _timeForMoveComputation)
-        int maxIterations = 25;
-        int noIterations = 1;
-
-        // if (playMethodCallCount == 12)
-        // {
-        //     errorcheck = true;
-        // }
-        while(noIterations <= maxIterations)
+        //int maxIterations = 250;
+        //int noIterations = 1;
+        //while(noIterations <= maxIterations)
+        Move chosenMove = null;
+        if (possibleMoves.Count == 1 && possibleMoves[0].Command == CommandEnum.END_TURN)
         {
-            //create a random determinisation from the tree root and store alongside root
-            //information set node
-            InfosetNode rootNode = tree.GetRootDeterminisation();
-            
-            //enter selection routine - return a selected node ready to expand, along with a set of actions
-            //that have no nodes in in the tree
-            Tuple<InfosetNode, List<InfosetAction>, List<InfosetNode>> selectedNodeActionsNotInTreeAndPath = select(tree, rootNode);
-            
-            //if selected node has children not in the tree then expand the tree
-            InfosetNode selectedNode = selectedNodeActionsNotInTreeAndPath.Item1;
-            List<InfosetAction> actionsNotInTree = selectedNodeActionsNotInTreeAndPath.Item2;
-            List<InfosetNode> pathThroughTree =  selectedNodeActionsNotInTreeAndPath.Item3;
-            InfosetNode expandedNode = selectedNode;
-            if (actionsNotInTree.Count != 0)
+            _startOfTurn = true;
+            _usedTimeInTurn = TimeSpan.FromSeconds(0);
+            _turnCounter += 1;
+            _moveCounter += 1;
+            return possibleMoves[0];
+        }
+
+        if (_usedTimeInTurn + _timeForMoveComputation >= _turnTimeout)
+        {
+            chosenMove = possibleMoves.PickRandom(rng);
+        }
+        else
+        {
+            int actionCounter = 0;
+            Stopwatch s = new Stopwatch();
+            s.Start();
+            while (s.Elapsed < _timeForMoveComputation)
             {
-                expandedNode = Expand(tree, actionsNotInTree);
-                pathThroughTree.Add(expandedNode);
-            }
-            
-            //next we simulate our playouts from our expanded node 
-            double payoutFromExpandedNode = Simulate(expandedNode.GetDeterminisation());
-            
-            //next we complete the backpropagation step
-            BackPropagation(tree, payoutFromExpandedNode, pathThroughTree);
+                //create a random determinisation from the tree root and store alongside root
+                //information set node
+                InfosetNode rootNode = tree.GetRootDeterminisation();
 
-            noIterations += 1;
+                //enter selection routine - return a selected node ready to expand, along with a set of actions
+                //that have no nodes in in the tree
+                Tuple<InfosetNode, List<InfosetAction>, List<InfosetNode>> selectedNodeActionsNotInTreeAndPath =
+                    select(tree, rootNode);
+
+                //if selected node has children not in the tree then expand the tree
+                InfosetNode selectedNode = selectedNodeActionsNotInTreeAndPath.Item1;
+                List<InfosetAction> actionsNotInTree = selectedNodeActionsNotInTreeAndPath.Item2;
+                List<InfosetNode> pathThroughTree = selectedNodeActionsNotInTreeAndPath.Item3;
+                InfosetNode expandedNode = selectedNode;
+                if (actionsNotInTree.Count != 0)
+                {
+                    expandedNode = Expand(tree, actionsNotInTree);
+                    pathThroughTree.Add(expandedNode);
+                }
+
+                //next we simulate our playouts from our expanded node 
+                double payoutFromExpandedNode = Simulate(expandedNode.GetDeterminisation(), maxSimulationDepth);
+
+                //next we complete the backpropagation step
+                BackPropagation(tree, payoutFromExpandedNode, pathThroughTree);
+
+                _simsCounter += 1;
+                //noIterations += 1;
+            }
+            _usedTimeInTurn += _timeForMoveComputation;
+
+            //finally we return the move from the root node that leads to a node with the maximum visit count
+            chosenMove = chooseBestMove(tree);
+
+            //output log message to track progress
+            //s.Stop();
+            //TimeSpan ts = s.Elapsed;
+
+            // // Format and display the elapsed time
+            // string elapsedTime = String.Format("{0:00}:{1:00}:{2:00}.{3:00}",
+            //     ts.Hours, ts.Minutes, ts.Seconds,
+            //     ts.Milliseconds / 10);
+            //
+            // string message = "Play method call count: " + playMethodCallCount.ToString() + " Time Elapsed: " +
+            //                  elapsedTime;
+            // log.Log(gameState.CurrentPlayer.PlayerID, message);
+            //
+            // if (chosenMove is null)
+            // {
+            //     Move chosenMoveTest = Play(gameState, possibleMoves, remainingTime);
+            // }
         }
         
-        //finally we return the move from the root node that leads to a node with the maximum visit count
-        Move chosenMove = chooseBestMove(tree);
-        
-        //output log message to track progress
-        s.Stop();
-        TimeSpan ts = s.Elapsed;
-        
-        // // Format and display the elapsed time
-        // string elapsedTime = String.Format("{0:00}:{1:00}:{2:00}.{3:00}",
-        //     ts.Hours, ts.Minutes, ts.Seconds,
-        //     ts.Milliseconds / 10);
-        //
-        // string message = "Play method call count: " + playMethodCallCount.ToString() +" Time Elapsed: " + elapsedTime;
-        // log.Log(gameState.CurrentPlayer.PlayerID, message);
-        
-        if (chosenMove is null)
+        if (chosenMove.Command == CommandEnum.END_TURN)
         {
-            Move chosenMoveTest = Play(gameState, possibleMoves, remainingTime);
+            _startOfTurn = true;
+            _turnCounter += 1;
+            _usedTimeInTurn = TimeSpan.FromSeconds(0);
         }
+        
+        _moveCounter += 1;
         return chosenMove;
     }
     
@@ -193,14 +238,17 @@ public class SOISMCTS : AI
     }
 
     //simulate our game from a given determinisation (ignoring information sets)
-    private double Simulate(Determinisation d0)
+    private double Simulate(Determinisation d0, int depth)
     {
         int Count = 0;
         Determinisation d = d0;
         double bestPlayoutScore = 0;
+        int depthCount = 0;
         double eps = 0.0001; //used to check for equality on playout scores betwwen nodes
-        while (d.state.GameEndState == null) //GameEndState is only not null for terminal nodes
+        while (d.state.GameEndState == null && depthCount <= depth) //GameEndState is only not null for terminal nodes
         {
+            PlayerEnum currentPlayer = d.state.CurrentPlayer.PlayerID;
+                
             //create all legal next states 
             List<Determinisation> possibleDeterminisations = new List<Determinisation>();
             foreach (Move move in d.moves)
@@ -239,14 +287,12 @@ public class SOISMCTS : AI
 
             d = bestd;
             Count += 1;
-            if (Count >= 20000)
+            if (d.state.CurrentPlayer.PlayerID != currentPlayer)
             {
-                //seem to be stuck in infinite loop unable to find am end of game state, in which case just return
-                //bext value found so far (hopefully this wont be an issue when MCTS play better and seeding from the system clock....)
-                return bestPlayoutScore;
+                //player change has occured so increase depthcount
+                depthCount += 1;
             }
         }
-
         return bestPlayoutScore;
     }
     
@@ -331,7 +377,12 @@ public class SOISMCTS : AI
     public override void GameEnd(EndGameState state, FullGameState? finalBoardState)
     {
         GameEndReason reason = state.Reason;
-        int i = 0;
+        string message = "MCTS Simulation Counter: " + _simsCounter.ToString();
+        log.Log(finalBoardState.CurrentPlayer.PlayerID, message);
+        message = "Turn Counter: " + _turnCounter.ToString();
+        log.Log(finalBoardState.CurrentPlayer.PlayerID, message);
+        message = "Moves counter: " + _moveCounter.ToString();
+        log.Log(finalBoardState.CurrentPlayer.PlayerID, message);
     }
 }
 
