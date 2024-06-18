@@ -41,8 +41,8 @@ public class SOISMCTS : AI
         
         //seed random number generator
         long seed = DateTime.Now.Ticks;
-        //rng = new(123);  //TODO: initialise using clock when code complete
-        rng = new((ulong)seed); 
+        rng = new(123);  
+        //rng = new((ulong)seed); 
         
         //create logger object
         log = new Logger();
@@ -86,7 +86,7 @@ public class SOISMCTS : AI
 
         //Initialise a root node
         SeededGameState s = gameState.ToSeededGameState((ulong) rng.Next());
-        Determinisation d = new Determinisation(s, possibleMoves); //not possible moves are compatible with all seeds at the root
+        Determinisation d = new Determinisation(s, possibleMoves); //note that all possible moves are compatible with all seeds at the root
         InfosetNode root = new InfosetNode(null, null, d);
         
         //in InfosetMCTS each iteration of the loop starts with a new determinisation we use to explore the SAME tree
@@ -112,18 +112,24 @@ public class SOISMCTS : AI
             Stopwatch timer = new Stopwatch();
             timer.Start();
             while (timer.Elapsed < _timeForMoveComputation)
+            //int maxIterations = 50;
+            //for(int i = 0; i < maxIterations; i++)
             {
+                //if (_moveCounter == 17)
+                //{
+                //    int j = 0;
+                //}
                 //create a random determinisation 
                 s = gameState.ToSeededGameState((ulong) rng.Next());
                 d = new Determinisation(s, possibleMoves); //not possible moves are compatible with all seeds at the root
                 //and set as determinisation to use for this iteration
                 root.SetDeterminisationAndParentMove(d, null);
 
-                //enter selection routine - return an array of nodes with index zero corresponding ot root and final
-                //entry corresponding to the node for expansion
+                //enter selection routine - return an array of nodes with index zero corresponding to root and final
+                //entry corresponding to the node selected for expansion
                 List<InfosetNode> pathThroughTree = select(root);
 
-                //if selected node has children not in the tree then expand the tree
+                //if selected node has moves leading to nodes not in the tree then expand the tree
                 InfosetNode selectedNode = pathThroughTree[pathThroughTree.Count -1];
                 var (cvd, uvd) = selectedNode.GetChildrenInTreeAndMovesNotInTree();
                 InfosetNode expandedNode = selectedNode;
@@ -146,6 +152,11 @@ public class SOISMCTS : AI
 
             //finally we return the move from the root node that leads to a node with the maximum visit count
             chosenMove = chooseBestMove(root);
+
+            //if (chosenMove is null)
+            //{
+            //    int i = 0;
+            //}
         }
         
         if (chosenMove.Command == CommandEnum.END_TURN)
@@ -162,9 +173,9 @@ public class SOISMCTS : AI
     //returns the sleected path through the tree
     public List<InfosetNode> select(InfosetNode startNode)
     { 
-        //descend our infoset tree (restricted to nodes/actions compatible with d associated with our start node)
-        //using our chosen tree policy until a node is reached such that some action from that node leads to
-        //information set that is not currently in the tree or the node v is terminal
+        //descend our infoset tree (restricted to nodes/actions compatible with the current determinisation of our start node)
+        //Each successive node is chosen using our tree policy until a node is reached such that some action from that node leads to
+        //an information set that is not currently in the tree or the node v is terminal
         InfosetNode bestNode = startNode;
         var (cvd, uvd) = startNode.GetChildrenInTreeAndMovesNotInTree();
         //this contains each node passed through in this iteration 
@@ -191,7 +202,8 @@ public class SOISMCTS : AI
     //uvd is the set of actions from 
     private InfosetNode Expand(InfosetNode node)
     {
-        //choose a move at random from our and add child node to tree
+        //choose a move at random from our list of moves that do not have nodes in the tree
+        //and add child node to tree
         var (cvd, uvd) = node.GetChildrenInTreeAndMovesNotInTree();
         Move move = uvd.PickRandom(rng);
         var (newSeededGameState, newMoves) = node.GetDeterminisation().GetState().ApplyMove(move);
@@ -290,7 +302,7 @@ public class SOISMCTS : AI
     public Move chooseBestMove(InfosetNode rootNode)
     {
         //note that for the root node, all possible moves are compatible with any determinisation
-        //as it is the observing player's turn to go. Also the move that was used to last go from the root
+        //as it is the observing player's turn to go. Also the move that was used to last to go from the root
         //to the best node would be the same as any other move to go between these nodes 
         int bestVisitCount = 0;
         Move bestMove = null;
@@ -354,7 +366,7 @@ public class InfosetNode
     private SeededGameState _refState; //reference state, i.e. one instance of the set of equivalent states for this node
     private Determinisation? _currentDeterminisation; //to store determinisation that is currently being used in MCTS
     public Move? _currentMoveFromParent; //stores move used to reach this node using determinisation of the parent node
-    private List<Move>? _currentMovesWithNoChildren; //stores moves form current determinsation that have no children
+    private List<Move>? _currentMovesWithNoChildren; //stores moves from current determinsation that have no children
     private List<InfosetNode>? _compatibleChildrenInTree; //list of children compatible with current determinisation that are in the list of children
     public double TotalReward;
     public int VisitCount;
@@ -384,14 +396,11 @@ public class InfosetNode
     {
         _currentDeterminisation = d;
         _currentMoveFromParent = fromParent;
+        
+        //need to set compatible children and moves with no children to null so that they
+        //are recalculated 
         _compatibleChildrenInTree = null;
         _currentMovesWithNoChildren = null;
-        
-        //also need to set to null anything to do with the determinisation for all nodes further down the tree form this one.
-        foreach (InfosetNode node in Children)
-        {
-            node.SetDeterminisationAndParentMove(null, null);
-        }
     }
 
     public Determinisation? GetDeterminisation()
@@ -407,7 +416,7 @@ public class InfosetNode
         return ucbVal;
     }
     
-    //returns lists of moves in current determinisation for which there are no children in the tree
+    //returns lists of moves in current determinisation for which there are compatible children in the tree
     //and list of moves for which there are no children
     public Tuple<List<InfosetNode>, List<Move>> GetChildrenInTreeAndMovesNotInTree()
     {
@@ -426,10 +435,11 @@ public class InfosetNode
             {
                 if (child.CheckEquivalentState(newState))
                 {
-                    //found child node that is an equivalent state
+                    //found child node that represents an information set containing equivalent states
                     found = true;
                     child.SetDeterminisationAndParentMove(new Determinisation(newState, newMoves), move); 
                     _compatibleChildrenInTree.Add(child);
+                    break;
                 }
             }
 
