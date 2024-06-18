@@ -30,8 +30,28 @@ public class SOISMCTS : AI
     private int playMethodCallCount = 0;
     
     //parameters for MCTS
-    private readonly double K = 1.0; //explore vs exploit parameter for tree policy
-    private readonly int maxSimulationDepth = 2; //only explore current player and next player response
+    private readonly double K = 0.7; //explore vs exploit parameter for tree policy
+    private readonly int maxSimulationDepth = 30; //only explore current player and next player response
+    
+    //parameters for heuristicfrom MCTSBot.cs
+    private int _patronFavour = 50;
+    private int _patronNeutral = 10;
+    private int _patronUnfavour = -50;
+    private int _coinsValue = 1;
+    private int _powerValue = 40;
+    private int _prestigeValue = 50;
+    private int _agentOnBoardValue = 30;
+    private int _hpValue = 3;
+    private int _opponentAgentsPenaltyValue = 40;
+    private int _potentialComboValue = 3;
+    private int _cardValue = 10;
+    private int _penaltyForHighTierInTavern = 2;
+    private int _numberOfDrawsValue = 10;
+    private int _enemyPotentialComboPenalty = 1;
+    private int _heuristicMax = 40000; //160
+    private int _heuristicMin = -10000;//00
+    //int heuristicMax = 160;
+    //int heuristicMin = 0;
 
     public static bool errorcheck = false;
     
@@ -41,8 +61,8 @@ public class SOISMCTS : AI
         
         //seed random number generator
         long seed = DateTime.Now.Ticks;
-        rng = new(123);  
-        //rng = new((ulong)seed); 
+        //rng = new(123);  
+        rng = new((ulong)seed); 
         
         //create logger object
         log = new Logger();
@@ -61,8 +81,7 @@ public class SOISMCTS : AI
         //increment game counter
         _gameCounter += 1;
 
-        //TODO: can we initialise and store a static tree object so that we can re-use the tree from 
-        //move to move
+        //TODO: can we initialise and store a static tree object so that we can re-use the tree from move to move?
     }
 
     public SOISMCTS()
@@ -85,9 +104,10 @@ public class SOISMCTS : AI
         }
 
         //Initialise a root node
+        PlayerEnum observingPlayer = gameState.CurrentPlayer.PlayerID; //observing player for information sets in tree
         SeededGameState s = gameState.ToSeededGameState((ulong) rng.Next());
         Determinisation d = new Determinisation(s, possibleMoves); //note that all possible moves are compatible with all seeds at the root
-        InfosetNode root = new InfosetNode(null, null, d);
+        InfosetNode root = new InfosetNode(null, null, d, observingPlayer);
         
         //in InfosetMCTS each iteration of the loop starts with a new determinisation we use to explore the SAME tree
         //updating the stats for each tree node (which are information sets as seen by a chosen observer, in our
@@ -237,14 +257,16 @@ public class SOISMCTS : AI
             //take first move from the list, use asa  reference to capture the case where all payouts are equal for
             //the next nodes
             Determinisation bestd = possibleDeterminisations[0];
-            double playoutScore = playoutHeuristic(bestd.GetState());
+            //double playoutScore = playoutHeuristic(bestd.GetState());
+            //use MCTSBOt heuristic
+            double playoutScore = Heuristic(bestd.GetState());
             double firstPlayoutScore = playoutScore;
             bestPlayoutScore = firstPlayoutScore;
 
             bool allequal = true;
             for (var i = 1; i < possibleDeterminisations.Count; i++) //ignore the first move in this loop 
             {
-                playoutScore = playoutHeuristic(possibleDeterminisations[i].GetState());
+                playoutScore = Heuristic(possibleDeterminisations[i].GetState());
                 if (!(playoutScore < (firstPlayoutScore + eps) && playoutScore > (firstPlayoutScore - eps)))
                 {
                     allequal = false;
@@ -316,26 +338,128 @@ public class SOISMCTS : AI
         }
         return bestMove;
     }
-
-    //heuristic used to choose each move in simulate function. Currently we choose moves that maximise prestige
-    private double playoutHeuristic(SeededGameState state)
+    
+    //Heuristic 'borrowed' from MCTSBot.cs
+    public double Heuristic(SeededGameState gameState)
     {
-        double prestige = state.CurrentPlayer.Prestige;
-        if (state.GameEndState != null)
+        int finalValue = 0;
+        int enemyPatronFavour = 0;
+        foreach (KeyValuePair<PatronId, PlayerEnum> entry in gameState.PatronStates.All)
         {
-            if (state.GameEndState.Winner == state.CurrentPlayer.PlayerID)
+            if (entry.Key == PatronId.TREASURY)
             {
-                return prestige * 1.5;
+                continue;
+            }
+            if (entry.Value == gameState.CurrentPlayer.PlayerID)
+            {
+                finalValue += _patronFavour;
+            }
+            else if (entry.Value == PlayerEnum.NO_PLAYER_SELECTED)
+            {
+                finalValue += _patronNeutral;
             }
             else
             {
-                return prestige * 0.5;
+                finalValue += _patronUnfavour;
+                enemyPatronFavour += 1;
             }
         }
-        else
+        if (enemyPatronFavour >= 2)
         {
-            return prestige;
+            finalValue -= 100;
         }
+
+        finalValue += gameState.CurrentPlayer.Power * _powerValue;
+        finalValue += gameState.CurrentPlayer.Prestige * _prestigeValue;
+        //finalValue += gameState.CurrentPlayer.Coins * _coinsValue;
+
+        if (gameState.CurrentPlayer.Prestige < 30)
+        {
+            TierEnum tier = TierEnum.UNKNOWN;
+
+            foreach (SerializedAgent agent in gameState.CurrentPlayer.Agents)
+            {
+                tier = CardTierList.GetCardTier(agent.RepresentingCard.Name);
+                finalValue += _agentOnBoardValue * (int)tier + agent.CurrentHp * _hpValue;
+            }
+
+            foreach (SerializedAgent agent in gameState.EnemyPlayer.Agents)
+            {
+                tier = CardTierList.GetCardTier(agent.RepresentingCard.Name);
+                finalValue -= _agentOnBoardValue * (int)tier + agent.CurrentHp * _hpValue + _opponentAgentsPenaltyValue;
+            }
+
+            List<UniqueCard> allCards = gameState.CurrentPlayer.Hand.Concat(gameState.CurrentPlayer.Played.Concat(gameState.CurrentPlayer.CooldownPile.Concat(gameState.CurrentPlayer.DrawPile))).ToList();
+            Dictionary<PatronId, int> potentialComboNumber = new Dictionary<PatronId, int>();
+            List<UniqueCard> allCardsEnemy = gameState.EnemyPlayer.Hand.Concat(gameState.EnemyPlayer.DrawPile).Concat(gameState.EnemyPlayer.Played.Concat(gameState.EnemyPlayer.CooldownPile)).ToList();
+            Dictionary<PatronId, int> potentialComboNumberEnemy = new Dictionary<PatronId, int>();
+
+            foreach (UniqueCard card in allCards)
+            {
+                tier = CardTierList.GetCardTier(card.Name);
+                finalValue += (int)tier * _cardValue;
+                if (card.Deck != PatronId.TREASURY)
+                {
+                    if (potentialComboNumber.ContainsKey(card.Deck))
+                    {
+                        potentialComboNumber[card.Deck] += 1;
+                    }
+                    else
+                    {
+                        potentialComboNumber[card.Deck] = 1;
+                    }
+                }
+            }
+
+            foreach (UniqueCard card in allCardsEnemy)
+            {
+                if (card.Deck != PatronId.TREASURY)
+                {
+                    if (potentialComboNumberEnemy.ContainsKey(card.Deck))
+                    {
+                        potentialComboNumberEnemy[card.Deck] += 1;
+                    }
+                    else
+                    {
+                        potentialComboNumberEnemy[card.Deck] = 1;
+                    }
+                }
+            }
+
+            foreach (KeyValuePair<PatronId, int> entry in potentialComboNumber)
+            {
+                finalValue += (int)Math.Pow(entry.Value, _potentialComboValue);
+            }
+
+            foreach (Card card in gameState.TavernAvailableCards)
+            {
+                tier = CardTierList.GetCardTier(card.Name);
+                finalValue -= _penaltyForHighTierInTavern * (int)tier;
+                /*
+                if (potentialComboNumberEnemy.ContainsKey(card.Deck) && (potentialComboNumberEnemy[card.Deck]>4) && (tier > TierEnum.B)){
+                    finalValue -= enemyPotentialComboPenalty*(int)tier;
+                }
+                */
+            }
+
+        }
+
+        //int finalValue = gameState.CurrentPlayer.Power + gameState.CurrentPlayer.Prestige;
+        double normalizedValue = NormalizeHeuristic(finalValue);
+
+        return normalizedValue;
+    }
+
+    private double NormalizeHeuristic(int value)
+    {
+        double normalizedValue = ((double)value - (double)_heuristicMin) / ((double)_heuristicMax - (double)_heuristicMin);
+
+        if (normalizedValue < 0)
+        {
+            return 0.0;
+        }
+
+        return normalizedValue;
     }
 
     public override void GameEnd(EndGameState state, FullGameState? finalBoardState)
@@ -350,6 +474,8 @@ public class SOISMCTS : AI
         message = "Average number of moves per turn: " + avgMovesPerTurn.ToString();
         log.Log(finalBoardState.CurrentPlayer.PlayerID, message);
         message = "Average number of simulations per move: " + avgSimsPerMove;
+        log.Log(finalBoardState.CurrentPlayer.PlayerID, message);
+        message = "Winner: " + state.Winner.ToString();
         log.Log(finalBoardState.CurrentPlayer.PlayerID, message);
         
         //prepare for next game
@@ -371,12 +497,16 @@ public class InfosetNode
     public double TotalReward;
     public int VisitCount;
     public int AvailabilityCount;
+    public PlayerEnum ObservingPlayer; //observing player is assumed to be the player to play next at the root node
     
     //create a node using a reference determinisation for information set it encapsulates
-    public InfosetNode(InfosetNode? parent, Move? moveFromParent, Determinisation d)
+    public InfosetNode(InfosetNode? parent, Move? moveFromParent, Determinisation d, PlayerEnum observPlayer)
     {
         //when a node is first instatntiated a reference state is stored to define in the information set equivalence class
         _refState = d.GetState();
+        
+        //pbserving player should be constant across the whole tree, this is enforced by the create child method
+        ObservingPlayer = observPlayer;
         
         //initialise values for UCB calc
         TotalReward = 0.0001;
@@ -411,8 +541,7 @@ public class InfosetNode
     //calculate upper confidence bound for trees, bandit algorithm for MCTS tree policy
     public double UCB(double K)
     {
-        double normalisedReward = TotalReward / 80.0; //80 is the upper limit for a tie break
-        double ucbVal = normalisedReward / (VisitCount * 1.0) + K * Math.Sqrt(Math.Log((AvailabilityCount * 1.0) / (VisitCount * 1.0) ));
+        double ucbVal = TotalReward / (VisitCount * 1.0) + K * Math.Sqrt(Math.Log(AvailabilityCount) / (VisitCount * 1.0));
         return ucbVal;
     }
     
@@ -454,7 +583,9 @@ public class InfosetNode
     
     public InfosetNode CreateChild(Move parentMove, Determinisation newd)
     {
-        InfosetNode childNode = new InfosetNode(this, parentMove, newd);
+        //TODO::this needs to add an information set node that is appropriate
+        //for the observing player
+        InfosetNode childNode = new InfosetNode(this, parentMove, newd, this.ObservingPlayer);
         Children.Add(childNode);
 
         return childNode;
@@ -463,18 +594,127 @@ public class InfosetNode
     //check if a state is part of the equivalence class for this node
     public bool CheckEquivalentState(SeededGameState state)
     {
-        //to check whether two seeded states are in the same equivalence set we need to check that all the 
-        //visible information for the current player is the same for the SeededGameStates refState and state 
+        //to check whether our states are equivalent we need to identify information visible ot the observing player
+        //and ensure that is the same in both cases. We also need to identify information that is not visible to the observing player 
+        //(and whether or not it is visible to the non-observing player) ensure this information is the same up to a permutation.
         
-        //check current player is the same
+        //to check whether two seeded states are in the same equivalence set we first check that all the visible information is the same
+        if (!sameVisibleInfo(state))
+            return false;
+
+        //then we need to check that all the hidden information is the same up to a permutation
+        if (!sameHiddenInfo(state))
+            return false;
+        
+        return true;
+    }
+
+    public bool sameHiddenInfo(SeededGameState state)
+    {
+        //to check the information hidden to the observing player is equivalent between two game states, we need to check the following
+        //are the same up to a permutation
+        //1. The combined non-observing player's hand and draw pile
+        //2. The observing player's draw pile 
+
+        SerializedPlayer observingPlayerInRefState;
+        SerializedPlayer nonObservingPlayerInRefState;
+        if (ObservingPlayer == _refState.CurrentPlayer.PlayerID)
+        {
+            observingPlayerInRefState = _refState.CurrentPlayer;
+            nonObservingPlayerInRefState = _refState.EnemyPlayer;
+        }
+        else
+        {
+            observingPlayerInRefState = _refState.EnemyPlayer;
+            nonObservingPlayerInRefState = _refState.CurrentPlayer;
+        }
+        
+        SerializedPlayer observingPlayerInState;
+        SerializedPlayer nonObservingPlayerInState;
+        if (ObservingPlayer == state.CurrentPlayer.PlayerID)
+        {
+            observingPlayerInState = state.CurrentPlayer;
+            nonObservingPlayerInState = _refState.EnemyPlayer;
+        }
+        else
+        {
+            observingPlayerInState = state.EnemyPlayer;
+            nonObservingPlayerInState = _refState.CurrentPlayer;
+        }
+        
+        //check that the non-observing player's combined hand and draw pile is the same up to a permutation
+        List<UniqueCard> nonObsHandPlusDrawRefState =
+            nonObservingPlayerInRefState.Hand.Concat(nonObservingPlayerInRefState.DrawPile).ToList();
+        List<UniqueCard> nonObsHandPlusDrawState =
+            nonObservingPlayerInState.Hand.Concat(nonObservingPlayerInState.DrawPile).ToList();
+        if (!(AreListsPermutations<UniqueCard>(nonObsHandPlusDrawState, nonObsHandPlusDrawRefState)))
+            return false;
+            
+        //check that observing player's draw pile is the same in both states up to a permutation
+        if(!(AreListsPermutations<UniqueCard>(observingPlayerInState.DrawPile, observingPlayerInRefState.DrawPile))) 
+            return false;
+        
+        return true;
+    }
+    
+    public bool sameVisibleInfo(SeededGameState state)
+    {
+        //to check the information visible to the observing player is the same between two game states, we need to check the following:
+        //1. Information that only the observing player can see must be the same - i.e. their hand, and known upcoming draws
+        //2. Everything else that can be seen by both observing and non-observing player (i.e. information that is always
+        //visible to both players) must be the same. This consists of the following game elements:
+        //i) Coins, power and prestige amounts
+        //ii) Available Tavern cards on board
+        //iii) Status of patrons
+        //iv) Played cards are the same (i.e. played pile)
+        //v) current player and enemy players are the same
+        //vi) Agents on the board are the same
+        //vii) Both players will be aware of the others cooldown pile (as they will have seen the cards being played)
+        //viii) Any upcoming effects or decisions should be the same
+        //iX) Any patron calls and the game end state
+        
+        //check current player is the same in both states
         PlayerEnum statePlayerID = state.CurrentPlayer.PlayerID;
         PlayerEnum refStatePlayerID = _refState.CurrentPlayer.PlayerID;
         if (statePlayerID != refStatePlayerID)
             return false;
         
-        //check board state is the same
-        if (!state.BoardState.Equals(_refState.BoardState))
+        ////////////check information that is visible only to observing payer//////////////
+        SerializedPlayer observingPlayerInRefState;
+        if (ObservingPlayer == _refState.CurrentPlayer.PlayerID)
+        {
+            observingPlayerInRefState = _refState.CurrentPlayer;
+        }
+        else
+        {
+            observingPlayerInRefState = _refState.EnemyPlayer;
+        }
+        
+        SerializedPlayer observingPlayerInState;
+        if (ObservingPlayer == state.CurrentPlayer.PlayerID)
+        {
+            observingPlayerInState = state.CurrentPlayer;
+        }
+        else
+        {
+            observingPlayerInState = state.EnemyPlayer;
+        }
+        
+        //check that the hand of the observing player is the same 
+        if (!observingPlayerInState.Hand.SequenceEqual(observingPlayerInRefState.Hand))
             return false;
+        
+        //check that known upcoming draws for the observing player are the same (some cards have effects that let a player
+        //know what is about to be drawn)
+        if (!observingPlayerInState.KnownUpcomingDraws.SequenceEqual(observingPlayerInRefState.KnownUpcomingDraws))
+            return false;
+        
+        //////////Now check information visible to both observing and non-observing players/////////////
+        
+        //check board state is the same (TODO::what does this do?)
+        //if (!state.BoardState.Equals(_refState.BoardState))
+        //    return false;
+
         
         //check coins are the same in both states for both players
         if (state.CurrentPlayer.Coins != _refState.CurrentPlayer.Coins |
@@ -499,43 +739,33 @@ public class InfosetNode
                 return false;
         }
     
-        //check tavern cards on board are the same up to a permutation
-        if (!AreListsPermutations<UniqueCard>(state.TavernAvailableCards, _refState.TavernAvailableCards))
+        //check tavern cards on board are the same 
+        if (!state.TavernAvailableCards.SequenceEqual(_refState.TavernAvailableCards))
             return false;
         
-        //check current player's hand is the same up to a permutation
-        if (!AreListsPermutations<UniqueCard>(state.CurrentPlayer.Hand, _refState.CurrentPlayer.Hand))
-            return false;
-        
-        //check played cards are the same (I think order matters here for played cards - TODO: check this)
+        //check played cards are the same 
         if (!(state.CurrentPlayer.Played.SequenceEqual(_refState.CurrentPlayer.Played) 
               | state.EnemyPlayer.Played.SequenceEqual(_refState.EnemyPlayer.Played)))
             return false;
         
-        //check that known upcoming draws for the current player are the same (some cards have effects that let a player
-        //know what is about to be drawn)
-        if (!AreListsPermutations<UniqueCard>(state.CurrentPlayer.KnownUpcomingDraws, _refState.CurrentPlayer.KnownUpcomingDraws))
-            return false;
-        
-        //check agents on the board are the same for both players up to a permutation. Unfortunately the agent objects have
+        //check agents on the board are the same for both players . Unfortunately the agent objects have
         //not had their Equals operation over-ridden and we cant use the default operator as it just check memory address
         //and we will want to say two instances of the same agent are the same (if they belong to the same player)
         //so we use a specific function for this check
-        if (!(BespokePermutationsCheck<SerializedAgent>(state.CurrentPlayer.Agents, _refState.CurrentPlayer.Agents) 
-              && BespokePermutationsCheck<SerializedAgent>(state.EnemyPlayer.Agents, _refState.EnemyPlayer.Agents)))
+        if (!(BespokeEqualsCheck<SerializedAgent>(state.CurrentPlayer.Agents, _refState.CurrentPlayer.Agents) 
+              && BespokeEqualsCheck<SerializedAgent>(state.EnemyPlayer.Agents, _refState.EnemyPlayer.Agents)))
             return false;
         
-        //The current player will know what is in the cooldown pile both for himself and the enemy as he will have observed
-        //the card being played and then moving to the cooldown pile
-        if (!(AreListsPermutations<UniqueCard>(state.CurrentPlayer.Played, _refState.CurrentPlayer.Played) 
-              && AreListsPermutations<UniqueCard>(state.EnemyPlayer.Played, _refState.EnemyPlayer.Played)))
+        //The cooldown pile both is visible for both players, as they will have seen the cards being played previously
+        if (!(state.CurrentPlayer.Played.SequenceEqual(_refState.CurrentPlayer.Played) 
+              && state.EnemyPlayer.Played.SequenceEqual(_refState.EnemyPlayer.Played)))
             return false;
 
         //other final items to check, that are based on decisions the current game state is pending
-        if(!(AreListsPermutations<UniqueBaseEffect>(state.UpcomingEffects, _refState.UpcomingEffects)))
+        if(!(BespokeEqualsCheck<UniqueBaseEffect>(state.UpcomingEffects, _refState.UpcomingEffects)))
             return false;
         
-        if(!(AreListsPermutations<UniqueBaseEffect>(state.StartOfNextTurnEffects, _refState.StartOfNextTurnEffects)))
+        if(!(BespokeEqualsCheck<UniqueBaseEffect>(state.StartOfNextTurnEffects, _refState.StartOfNextTurnEffects)))
             return false;
 
         //check pending choices (not sure we need this if all played cards are the same)
@@ -546,7 +776,7 @@ public class InfosetNode
 
             if (state.PendingChoice.Type == Choice.DataType.EFFECT)
             {
-                if (!BespokePermutationsCheck<UniqueEffect>(state.PendingChoice.PossibleEffects,
+                if (!BespokeEqualsCheck<UniqueEffect>(state.PendingChoice.PossibleEffects,
                         _refState.PendingChoice.PossibleEffects))
                     return false;
             }
@@ -624,6 +854,20 @@ public class InfosetNode
             }
         }
         return (match.All(b => b) && used.All(b => b));
+    }
+    
+    public bool BespokeEqualsCheck<T>(List<T> list1, List<T> list2)
+    {
+        if (list1.Count != list2.Count)
+            return false;
+
+        for (int index = 0; index < list1.Count; index++)
+        {
+            if (!(EqualsOverride(list1[index], list2[index])))
+                return false;
+        }
+        
+        return true;
     }
 
     public bool EqualsOverride<T>(T item1, T item2)
@@ -762,4 +1006,123 @@ public class Determinisation
     // bool test4 = InfosetNode.AreAgentListsPermutations(list1, list2);
     // }
 
-
+// public bool CheckEquivalentState(SeededGameState state)
+//     {
+//         //to check whether two seeded states are in the same equivalence set we need to check that all the 
+//         //visible information for the current player is the same for the SeededGameStates refState and state 
+//         
+//         //TODO::do we need to check player draw pile and hand are the same up to a permutation?
+//         
+//         //TODO::this should depend on who the observing player is!
+//         
+//         //check current player is the same
+//         PlayerEnum statePlayerID = state.CurrentPlayer.PlayerID;
+//         PlayerEnum refStatePlayerID = _refState.CurrentPlayer.PlayerID;
+//         if (statePlayerID != refStatePlayerID)
+//             return false;
+//         
+//         //check board state is the same
+//         if (!state.BoardState.Equals(_refState.BoardState))
+//             return false;
+//         
+//         //check coins are the same in both states for both players
+//         if (state.CurrentPlayer.Coins != _refState.CurrentPlayer.Coins |
+//             state.EnemyPlayer.Coins != _refState.EnemyPlayer.Coins)
+//             return false;
+//         
+//         //check prestige is the same in both states for both players
+//         if (state.CurrentPlayer.Power != _refState.CurrentPlayer.Power |
+//             state.EnemyPlayer.Power != _refState.EnemyPlayer.Power)
+//             return false;
+//         
+//         //check power is the same in both states for both players
+//         if (state.CurrentPlayer.Power != _refState.CurrentPlayer.Power |
+//             state.EnemyPlayer.Power != _refState.EnemyPlayer.Power)
+//             return false;
+//         
+//         //check identical patron status. So for the list of patron for this games we check that the favour status for
+//         //each patron is the same between our states
+//         foreach(PatronId id in state.Patrons)
+//         {
+//             if (!(state.PatronStates.All[id].Equals(_refState.PatronStates.All[id])))
+//                 return false;
+//         }
+//     
+//         //check tavern cards on board are the same up to a permutation
+//         if (!AreListsPermutations<UniqueCard>(state.TavernAvailableCards, _refState.TavernAvailableCards))
+//             return false;
+//         
+//         //check current player's hand is the same up to a permutation
+//         if (!AreListsPermutations<UniqueCard>(state.CurrentPlayer.Hand, _refState.CurrentPlayer.Hand))
+//             return false;
+//         
+//         //check played cards are the same (I think order matters here for played cards - TODO: check this)
+//         if (!(state.CurrentPlayer.Played.SequenceEqual(_refState.CurrentPlayer.Played) 
+//               | state.EnemyPlayer.Played.SequenceEqual(_refState.EnemyPlayer.Played)))
+//             return false;
+//         
+//         //check that known upcoming draws for the current player are the same (some cards have effects that let a player
+//         //know what is about to be drawn)
+//         if (!AreListsPermutations<UniqueCard>(state.CurrentPlayer.KnownUpcomingDraws, _refState.CurrentPlayer.KnownUpcomingDraws))
+//             return false;
+//         
+//         //check agents on the board are the same for both players up to a permutation. Unfortunately the agent objects have
+//         //not had their Equals operation over-ridden and we cant use the default operator as it just check memory address
+//         //and we will want to say two instances of the same agent are the same (if they belong to the same player)
+//         //so we use a specific function for this check
+//         if (!(BespokePermutationsCheck<SerializedAgent>(state.CurrentPlayer.Agents, _refState.CurrentPlayer.Agents) 
+//               && BespokePermutationsCheck<SerializedAgent>(state.EnemyPlayer.Agents, _refState.EnemyPlayer.Agents)))
+//             return false;
+//         
+//         //The current player will know what is in the cooldown pile both for himself and the enemy as he will have observed
+//         //the card being played and then moving to the cooldown pile
+//         if (!(AreListsPermutations<UniqueCard>(state.CurrentPlayer.Played, _refState.CurrentPlayer.Played) 
+//               && AreListsPermutations<UniqueCard>(state.EnemyPlayer.Played, _refState.EnemyPlayer.Played)))
+//             return false;
+//
+//         //other final items to check, that are based on decisions the current game state is pending
+//         if(!(AreListsPermutations<UniqueBaseEffect>(state.UpcomingEffects, _refState.UpcomingEffects)))
+//             return false;
+//         
+//         if(!(AreListsPermutations<UniqueBaseEffect>(state.StartOfNextTurnEffects, _refState.StartOfNextTurnEffects)))
+//             return false;
+//
+//         //check pending choices (not sure we need this if all played cards are the same)
+//         if (state.PendingChoice != null && _refState.PendingChoice != null)
+//         {
+//             if (state.PendingChoice.Type != _refState.PendingChoice.Type)
+//                 return false;
+//
+//             if (state.PendingChoice.Type == Choice.DataType.EFFECT)
+//             {
+//                 if (!BespokePermutationsCheck<UniqueEffect>(state.PendingChoice.PossibleEffects,
+//                         _refState.PendingChoice.PossibleEffects))
+//                     return false;
+//             }
+//         }
+//         else
+//         {
+//             if (state.PendingChoice == null && _refState.PendingChoice != null)
+//             {
+//                 return false;
+//             }
+//             else if (state.PendingChoice != null && _refState.PendingChoice == null)
+//             {
+//                 return false;
+//             }
+//         }
+//         
+//         //check end game state. 
+//         if (!EqualsGameEndState(state.GameEndState, _refState.GameEndState))
+//             return false;
+//         
+//         //TODO: what is a patron call?
+//         if (state.CurrentPlayer.PatronCalls != _refState.CurrentPlayer.PatronCalls)
+//             return false;
+//         
+//         //items we dont check include CompletedActions, as this holds the complete history of the game, and is not needed.
+//         //we also dont check combostates, as presumably that is covered by played cards?
+//         
+//         //if we survive all our tests return true
+//         return true;
+//     }
