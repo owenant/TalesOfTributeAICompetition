@@ -34,7 +34,8 @@ public class SOISMCTS : AI
     
     //parameters for MCTS
     private readonly double K = 0.7; //explore vs exploit parameter for tree policy
-    private readonly int maxSimulationDepth = 30; //only explore current player and next player response
+    private readonly int maxSimulationDepth = 0; //only explore current player, if we change this to one or greater
+    //we may need to update UCB and heuritsic to reflect eneemy player turns
     
     //parameters for heuristicfrom MCTSBot.cs
     private int _patronFavour = 50;
@@ -64,8 +65,8 @@ public class SOISMCTS : AI
         
         //seed random number generator
         long seed = DateTime.Now.Ticks;
-        //rng = new(123);  
-        rng = new((ulong)seed); 
+        rng = new(123);  
+        //rng = new((ulong)seed); 
         
         //create logger object
         log = new Logger();
@@ -136,11 +137,11 @@ public class SOISMCTS : AI
         {
             int actionCounter = 0;
             int maxDepthForThisMove = 0;
-            Stopwatch timer = new Stopwatch();
-            timer.Start();
-            while (timer.Elapsed < _timeForMoveComputation)
-            //int maxIterations = 50;
-            //for(int i = 0; i < maxIterations; i++)
+            //Stopwatch timer = new Stopwatch();
+            //timer.Start();
+            //while (timer.Elapsed < _timeForMoveComputation)
+            int maxIterations = 50;
+            for(int i = 0; i < maxIterations; i++)
             {
                 //if (_moveCounter == 17)
                 //{
@@ -151,9 +152,9 @@ public class SOISMCTS : AI
                 d = new Determinisation(s, possibleMoves); //not possible moves are compatible with all seeds at the root
                 //and set as determinisation to use for this iteration
                 root.SetDeterminisationAndParentMove(d, null);
-
+                
                 //enter selection routine - return an array of nodes with index zero corresponding to root and final
-                //entry corresponding to the node selected for expansion
+                //entry corresponding to the node selected for expansio
                 List<InfosetNode> pathThroughTree = select(root);
 
                 //if selected node has moves leading to nodes not in the tree then expand the tree
@@ -303,7 +304,7 @@ public class SOISMCTS : AI
                 }
             }
 
-            //if all nodes have teh same playout score chose one at random
+            //if all nodes have the same playout score chose one at random
             if (allequal)
             {
                 bestd = possibleDeterminisations.PickRandom(rng);
@@ -557,6 +558,7 @@ public class InfosetNode
         _currentDeterminisation = d;
         _currentMoveFromParent = fromParent;
         
+        //Remove this as we go recursive and go all the way down thet
         //need to recalculate compatible children and moves not in tree based on updated determinisation
         calcChildrenInTreeAndMovesNotInTree();
     }
