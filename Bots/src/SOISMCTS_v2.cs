@@ -137,21 +137,21 @@ public class SOISMCTS : AI
         {
             int actionCounter = 0;
             int maxDepthForThisMove = 0;
-            //Stopwatch timer = new Stopwatch();
-            //timer.Start();
-            //while (timer.Elapsed < _timeForMoveComputation)
-            int maxIterations = 50;
-            for(int i = 0; i < maxIterations; i++)
+            Stopwatch timer = new Stopwatch();
+            timer.Start();
+            while (timer.Elapsed < _timeForMoveComputation)
+            //int maxIterations = 50;
+            //for(int i = 0; i < maxIterations; i++)
             {
                 //if (_moveCounter == 17)
                 //{
                 //    int j = 0;
                 //}
-                //create a random determinisation 
-                s = gameState.ToSeededGameState((ulong) rng.Next());
-                d = new Determinisation(s, possibleMoves); //not possible moves are compatible with all seeds at the root
+                //create a random determinisation - commented out for comparison against vanilla MCTS
+                //s = gameState.ToSeededGameState((ulong) rng.Next());
+                //d = new Determinisation(s, possibleMoves); //not possible moves are compatible with all seeds at the root
                 //and set as determinisation to use for this iteration
-                root.SetDeterminisationAndParentMove(d, null);
+                //root.SetDeterminisationAndParentMove(d, null);
                 
                 //enter selection routine - return an array of nodes with index zero corresponding to root and final
                 //entry corresponding to the node selected for expansio
@@ -557,10 +557,9 @@ public class InfosetNode
     {
         _currentDeterminisation = d;
         _currentMoveFromParent = fromParent;
-        
-        //Remove this as we go recursive and go all the way down thet
-        //need to recalculate compatible children and moves not in tree based on updated determinisation
-        calcChildrenInTreeAndMovesNotInTree();
+
+        _currentMovesWithNoChildren = null;
+        _compatibleChildrenInTree = null;
     }
 
     public Determinisation? GetDeterminisation()
@@ -614,7 +613,7 @@ public class InfosetNode
             bool found = false;
             foreach (InfosetNode child in Children)
             {
-                if (child.CheckEquivalentState(newState))
+                if (child.CheckEquivalentState(newState, move))
                 {
                     //found child node that represents an information set containing equivalent states
                     found = true;
@@ -638,18 +637,26 @@ public class InfosetNode
         InfosetNode childNode = new InfosetNode(this, parentMove, newd, this.ObservingPlayer);
         Children.Add(childNode);
         
-        //need ot recalculate children in tree
-        calcChildrenInTreeAndMovesNotInTree();
+        //also need to add to list of compatible children as this funciton is called when expanding the tree 
+        //and hence this child node is be definition compatibel with it's parent
+        this._compatibleChildrenInTree.Add(childNode);
+        
+        //also need to remove this parent move form the list of moves not in the tree
+        this._currentMovesWithNoChildren.Remove(parentMove);
 
         return childNode;
     }
     
     //check if a state is part of the equivalence class for this node
-    public bool CheckEquivalentState(SeededGameState state)
+    public bool CheckEquivalentState(SeededGameState state, Move parentMove)
     {
         //to check whether our states are equivalent we need to identify information visible to the observing player
         //and ensure that is the same in both cases.
-        if (!sameVisibleInfo(state))
+        //if (!sameVisibleInfo(state))
+        //    return false;
+        
+        //for comparison against standard MCTS
+        if (!(this.EqualsMove(_currentMoveFromParent, parentMove)))
             return false;
         
         return true;
@@ -817,7 +824,7 @@ public class InfosetNode
     {
         InfosetNode node = (InfosetNode)obj;
         
-        return CheckEquivalentState(node._refState);
+        return CheckEquivalentState(node._refState, node._currentMoveFromParent);
     }
 
     //function to check if set of cards are the same up to ordering 
@@ -915,6 +922,15 @@ public class InfosetNode
     private bool EqualsUniqueCard(UniqueCard card1, UniqueCard card2)
     {
         if (card1.GetType() != card2.GetType())
+            return false;
+
+        return true;
+    }
+    
+    //check for same move
+    private bool EqualsMove(Move move1, Move move2)
+    {
+        if (move1.Command != move2.Command)
             return false;
 
         return true;
