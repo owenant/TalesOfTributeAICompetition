@@ -7,6 +7,7 @@ using System.Diagnostics;
 using System.Dynamic;
 using System.Runtime;
 using ScriptsOfTribute.Board.Cards;
+using ScriptsOfTribute.Board.CardAction;
 using ScriptsOfTribute.utils;
 
 namespace Bots;
@@ -28,6 +29,7 @@ public class SOISMCTS : AI
     private static int _depthCounter = 0; //total tree depth explored across all moves
     private static int _widthFirstLayerCounter = 0; //number of nodes in first layer of tree
     private static int _widthSecondLayerCounter = 0; //number of nodes in second layer of tree
+    private static int _moveTimeOutCounter = 0; //number of times we time out a move across a game
     
     //counter for number of times play method is called
     private int playMethodCallCount = 0;
@@ -37,25 +39,27 @@ public class SOISMCTS : AI
     private readonly int maxSimulationDepth = 0; //only explore current player, if we change this to one or greater
     //we may need to update UCB and heuritsic to reflect eneemy player turns
     
-    //parameters for heuristicfrom MCTSBot.cs
-    private int _patronFavour = 50;
-    private int _patronNeutral = 10;
-    private int _patronUnfavour = -50;
-    private int _coinsValue = 1;
-    private int _powerValue = 40;
-    private int _prestigeValue = 50;
-    private int _agentOnBoardValue = 30;
-    private int _hpValue = 3;
-    private int _opponentAgentsPenaltyValue = 40;
-    private int _potentialComboValue = 3;
-    private int _cardValue = 10;
-    private int _penaltyForHighTierInTavern = 2;
-    private int _numberOfDrawsValue = 10;
-    private int _enemyPotentialComboPenalty = 1;
-    private int _heuristicMax = 40000; //160
-    private int _heuristicMin = -10000;//00
-    //int heuristicMax = 160;
-    //int heuristicMin = 0;
+    // //parameters for heuristicfrom MCTSBot.cs
+    // private int _patronFavour = 50;
+    // private int _patronNeutral = 10;
+    // private int _patronUnfavour = -50;
+    // private int _coinsValue = 1;
+    // private int _powerValue = 40;
+    // private int _prestigeValue = 50;
+    // private int _agentOnBoardValue = 30;
+    // private int _hpValue = 3;
+    // private int _opponentAgentsPenaltyValue = 40;
+    // private int _potentialComboValue = 3;
+    // private int _cardValue = 10;
+    // private int _penaltyForHighTierInTavern = 2;
+    // private int _numberOfDrawsValue = 10;
+    // private int _enemyPotentialComboPenalty = 1;
+    // private int _heuristicMax = 40000; //160
+    // private int _heuristicMin = -10000;//00
+    // //int heuristicMax = 160;
+    // //int heuristicMin = 0;
+    
+    private GameStrategy _strategy = new(10, GamePhase.EarlyGame);
 
     public static bool errorcheck = false;
     
@@ -65,8 +69,8 @@ public class SOISMCTS : AI
         
         //seed random number generator
         long seed = DateTime.Now.Ticks;
-        rng = new(123);  
-        //rng = new((ulong)seed); 
+        //rng = new(123);  
+        rng = new((ulong)seed); 
         
         //create logger object
         log = new Logger();
@@ -83,7 +87,8 @@ public class SOISMCTS : AI
         _simsCounter = 0;
         _depthCounter = 0;
         _widthFirstLayerCounter = 0; 
-        _widthSecondLayerCounter = 0; 
+        _widthSecondLayerCounter = 0;
+        _moveTimeOutCounter = 0;
         
         //increment game counter
         _gameCounter += 1;
@@ -108,18 +113,16 @@ public class SOISMCTS : AI
         {
             _startOfTurn = false;
             _usedTimeInTurn = TimeSpan.FromSeconds(0);
+            SelectStrategy(gameState);
         }
 
-        //Initialise a root node
-        PlayerEnum observingPlayer = gameState.CurrentPlayer.PlayerID; //observing player for information sets in tree
-        SeededGameState s = gameState.ToSeededGameState((ulong) rng.Next());
-        Determinisation d = new Determinisation(s, possibleMoves); //note that all possible moves are compatible with all seeds at the root
-        InfosetNode root = new InfosetNode(null, null, d, observingPlayer);
+        if (_turnCounter >= 16)
+        {
+            int i = 0;
+        }
         
-        //in InfosetMCTS each iteration of the loop starts with a new determinisation we use to explore the same tree
-        //updating the stats for each tree node (which are information sets as seen by a chosen observer, in our
-        //case our bot)
         Move chosenMove = null;
+        //if only possible move is end turn then just end the turn
         if (possibleMoves.Count == 1 && possibleMoves[0].Command == CommandEnum.END_TURN)
         {
             _startOfTurn = true;
@@ -128,9 +131,17 @@ public class SOISMCTS : AI
             _moveCounter += 1;
             return possibleMoves[0];
         }
+        
+        //Initialise a root node
+        PlayerEnum observingPlayer = gameState.CurrentPlayer.PlayerID; //observing player for information sets in tree
+        SeededGameState s = gameState.ToSeededGameState((ulong) rng.Next());
+        List<Move> filteredMoves = FilterMoves(possibleMoves, s); //filter on obvious moves to play
+        Determinisation d = new Determinisation(s, filteredMoves); //note that all possible moves are compatible with all seeds at the root
+        InfosetNode root = new InfosetNode(null, null, d, observingPlayer);
 
         if (_usedTimeInTurn + _timeForMoveComputation >= _turnTimeout)
         {
+            _moveTimeOutCounter += 1;
             chosenMove = possibleMoves.PickRandom(rng);
         }
         else
@@ -147,9 +158,14 @@ public class SOISMCTS : AI
                 //{
                 //    int j = 0;
                 //}
-                //create a random determinisation - commented out for comparison against vanilla MCTS
+                
+                //in InfosetMCTS each iteration of the loop starts with a new determinisation we use to explore the same tree
+                //updating the stats for each tree node (which are information sets as seen by a chosen observer, in our
+                //case our bot)
+                // commented out for comparison against vanilla MCTS
                 //s = gameState.ToSeededGameState((ulong) rng.Next());
-                //d = new Determinisation(s, possibleMoves); //not possible moves are compatible with all seeds at the root
+                //List<Move> filteredMoves = FilterMoves(possibleMoves, s);
+                //d = new Determinisation(s, filteredMoves); //not possible moves are compatible with all seeds at the root
                 //and set as determinisation to use for this iteration
                 //root.SetDeterminisationAndParentMove(d, null);
                 
@@ -168,7 +184,9 @@ public class SOISMCTS : AI
                 }
 
                 //next we simulate our playouts from our expanded node 
-                double payoutFromExpandedNode = Simulate((Determinisation) expandedNode.GetDeterminisation(), maxSimulationDepth);
+                //double payoutFromExpandedNode = Simulate(expandedNode, maxSimulationDepth);
+                //double payoutFromExpandedNode = SimulateToEndOfPlayersTurn(expandedNode);
+                double payoutFromExpandedNode = Simulate(expandedNode);
 
                 //next we complete the backpropagation step
                 BackPropagation(payoutFromExpandedNode, pathThroughTree);
@@ -196,11 +214,16 @@ public class SOISMCTS : AI
 
             //finally we return the move from the root node that leads to a node with the maximum visit count
             chosenMove = chooseBestMove(root);
+            
+            if (chosenMove.Command == CommandEnum.END_TURN && root.GetDeterminisation().GetState().CurrentPlayer.Coins >=5)
+            {
+                 int i = 0;
+            }
 
-            //if (chosenMove is null)
-            //{
-            //    int i = 0;
-            //}
+            if (chosenMove is null)
+            {
+                int i = 0;
+            }
         }
         
         if (chosenMove.Command == CommandEnum.END_TURN)
@@ -226,7 +249,9 @@ public class SOISMCTS : AI
         //this contains each node passed through in this iteration 
         List<InfosetNode> pathThroughTree = new List<InfosetNode>();
         pathThroughTree.Add(startNode);
-        while (bestNode.GetDeterminisation().GetState().GameEndState == null && uvd.Count == 0)
+        //change loop for now so that we only go as far as the current players end of turn
+        //while (bestNode.GetDeterminisation().GetState().GameEndState == null && uvd.Count == 0)
+        while(uvd.Count == 0)
         {
             double bestVal = 0;
             foreach(InfosetNode node in cvd)
@@ -241,6 +266,11 @@ public class SOISMCTS : AI
             cvd = bestNode.GetCompatibleChildrenInTree();
             uvd = bestNode.GetMovesWithNoChildren();
             pathThroughTree.Add(bestNode);
+
+            if (bestNode._currentMoveFromParent.Command == CommandEnum.END_TURN)
+            {
+                break;
+            }
         }
         return pathThroughTree;
     }
@@ -261,63 +291,35 @@ public class SOISMCTS : AI
     }
 
     //simulate our game from a given determinisation (ignoring information sets)
-    private double Simulate(Determinisation d0, int depth)
+    //adapted form last years winner
+    public double Simulate(InfosetNode startNode)
     {
-        int Count = 0;
-        Determinisation d = d0;
-        double bestPlayoutScore = 0;
-        int depthCount = 0;
-        double eps = 0.0001; //used to check for equality on playout scores betwwen nodes
-        while (d.GetState().GameEndState == null && depthCount <= depth) //GameEndState is only not null for terminal nodes
+        SeededGameState gameState = startNode.GetDeterminisation().GetState();
+        //List<Move> possibleMoves = node.children.ConvertAll<Move>(m => m.Item2);
+        List<Move> possibleMoves = startNode.GetDeterminisation().GetMoves();
+        List<Move> notEndMoves = possibleMoves.Where(m => m.Command != CommandEnum.END_TURN).ToList();
+        if (notEndMoves.Count == 0)
         {
-            PlayerEnum currentPlayer = d.GetState().CurrentPlayer.PlayerID;
-                
-            //create all legal next states 
-            List<Determinisation> possibleDeterminisations = new List<Determinisation>();
-            foreach (Move move in d.GetMoves())
+            return _strategy.Heuristic(startNode.GetDeterminisation().GetState());
+        }
+        Move move = notEndMoves.PickRandom(rng);
+    
+        while (move.Command != CommandEnum.END_TURN)
+        {
+            (gameState, possibleMoves) = gameState.ApplyMove(move);
+            notEndMoves = possibleMoves.Where(m => m.Command != CommandEnum.END_TURN).ToList();
+    
+            if (notEndMoves.Count > 0)
             {
-                var (newSeededGameState, newPossibleMoves) = d.GetState().ApplyMove(move);
-                possibleDeterminisations.Add(new Determinisation(newSeededGameState, newPossibleMoves));
+                move = notEndMoves.PickRandom(rng);
             }
-
-            //take first move from the list, use asa  reference to capture the case where all payouts are equal for
-            //the next nodes
-            Determinisation bestd = possibleDeterminisations[0];
-            //double playoutScore = playoutHeuristic(bestd.GetState());
-            //use MCTSBOt heuristic
-            double playoutScore = Heuristic(bestd.GetState());
-            double firstPlayoutScore = playoutScore;
-            bestPlayoutScore = firstPlayoutScore;
-
-            bool allequal = true;
-            for (var i = 1; i < possibleDeterminisations.Count; i++) //ignore the first move in this loop 
+            else
             {
-                playoutScore = Heuristic(possibleDeterminisations[i].GetState());
-                if (!(playoutScore < (firstPlayoutScore + eps) && playoutScore > (firstPlayoutScore - eps)))
-                {
-                    allequal = false;
-                    if (playoutScore > bestPlayoutScore)
-                    {
-                        bestPlayoutScore = playoutScore;
-                        bestd = possibleDeterminisations[i];
-                    }
-                }
-            }
-
-            //if all nodes have the same playout score chose one at random
-            if (allequal)
-            {
-                bestd = possibleDeterminisations.PickRandom(rng);
-            }
-
-            d = bestd;
-            if (d.GetState().CurrentPlayer.PlayerID != currentPlayer)
-            {
-                //player change has occured so increase depthcount
-                depthCount += 1;
+                move = Move.EndTurn();
             }
         }
-        return bestPlayoutScore;
+    
+        return _strategy.Heuristic(gameState);
     }
     
     //function too backpropagate simulation playout results
@@ -330,6 +332,7 @@ public class SOISMCTS : AI
         {
             node.VisitCount += 1;
             node.TotalReward += finalPayout;
+            node.MaxReward = Math.Max(finalPayout, node.MaxReward);
             node.AvailabilityCount += 1;
             List<InfosetNode> cvd = node.GetCompatibleChildrenInTree();
             foreach (InfosetNode child in cvd)
@@ -351,154 +354,251 @@ public class SOISMCTS : AI
         //note that for the root node, all possible moves are compatible with any determinisation
         //as it is the observing player's turn to go. Also the move that was used to last to go from the root
         //to the best node would be the same as any other move to go between these nodes 
-        int bestVisitCount = 0;
+        // int bestVisitCount = 0;
+        // Move bestMove = null;
+        // foreach (InfosetNode node in rootNode.Children)
+        // {
+        //     if (node.VisitCount > bestVisitCount)
+        //     {
+        //         bestVisitCount = node.VisitCount;
+        //         bestMove = node._currentMoveFromParent;
+        //     }   
+        // }
+
+        double bestScore = 0;
         Move bestMove = null;
         foreach (InfosetNode node in rootNode.Children)
         {
-            if (node.VisitCount > bestVisitCount)
+            if (node.MaxReward > bestScore)
             {
-                bestVisitCount = node.VisitCount;
+                bestScore = node.MaxReward;
                 bestMove = node._currentMoveFromParent;
             }   
+        }
+        
+        if (bestMove.Command == CommandEnum.END_TURN)
+        {
+            int i = 0;
         }
         return bestMove;
     }
     
-    //Heuristic 'borrowed' from MCTSBot.cs
-    public double Heuristic(SeededGameState gameState)
+    //functions to simulate moves out to end of player's turn - borrowed from MCTSBot
+    private List<Move> NotEndTurnPossibleMoves(List<Move> possibleMoves)
     {
-        int finalValue = 0;
-        int enemyPatronFavour = 0;
-        foreach (KeyValuePair<PatronId, PlayerEnum> entry in gameState.PatronStates.All)
+        return possibleMoves.Where(m => m.Command != CommandEnum.END_TURN).ToList();
+    }
+    
+    //functions to simulate moves out to end of player's turn - borrowed from MCTSBot
+    private Move DrawNextMove(List<Move> possibleMoves, SeededGameState gameState, SeededRandom rng)
+    {
+        Move nextMove;
+        List<Move> notEndTurnPossibleMoves = NotEndTurnPossibleMoves(possibleMoves);
+        if (notEndTurnPossibleMoves.Count > 0)
         {
-            if (entry.Key == PatronId.TREASURY)
+            if ((gameState.BoardState == BoardState.NORMAL) && (Extensions.RandomK(0, 10000, rng) == 0))
             {
-                continue;
-            }
-            if (entry.Value == gameState.CurrentPlayer.PlayerID)
-            {
-                finalValue += _patronFavour;
-            }
-            else if (entry.Value == PlayerEnum.NO_PLAYER_SELECTED)
-            {
-                finalValue += _patronNeutral;
+                nextMove = Move.EndTurn();
             }
             else
             {
-                finalValue += _patronUnfavour;
-                enemyPatronFavour += 1;
+                nextMove = notEndTurnPossibleMoves.PickRandom(rng);
             }
         }
-        if (enemyPatronFavour >= 2)
+        else
         {
-            finalValue -= 100;
+            nextMove = Move.EndTurn();
         }
-
-        finalValue += gameState.CurrentPlayer.Power * _powerValue;
-        finalValue += gameState.CurrentPlayer.Prestige * _prestigeValue;
-        //finalValue += gameState.CurrentPlayer.Coins * _coinsValue;
-
-        if (gameState.CurrentPlayer.Prestige < 30)
-        {
-            TierEnum tier = TierEnum.UNKNOWN;
-
-            foreach (SerializedAgent agent in gameState.CurrentPlayer.Agents)
-            {
-                tier = CardTierList.GetCardTier(agent.RepresentingCard.Name);
-                finalValue += _agentOnBoardValue * (int)tier + agent.CurrentHp * _hpValue;
-            }
-
-            foreach (SerializedAgent agent in gameState.EnemyPlayer.Agents)
-            {
-                tier = CardTierList.GetCardTier(agent.RepresentingCard.Name);
-                finalValue -= _agentOnBoardValue * (int)tier + agent.CurrentHp * _hpValue + _opponentAgentsPenaltyValue;
-            }
-
-            List<UniqueCard> allCards = gameState.CurrentPlayer.Hand.Concat(gameState.CurrentPlayer.Played.Concat(gameState.CurrentPlayer.CooldownPile.Concat(gameState.CurrentPlayer.DrawPile))).ToList();
-            Dictionary<PatronId, int> potentialComboNumber = new Dictionary<PatronId, int>();
-            List<UniqueCard> allCardsEnemy = gameState.EnemyPlayer.Hand.Concat(gameState.EnemyPlayer.DrawPile).Concat(gameState.EnemyPlayer.Played.Concat(gameState.EnemyPlayer.CooldownPile)).ToList();
-            Dictionary<PatronId, int> potentialComboNumberEnemy = new Dictionary<PatronId, int>();
-
-            foreach (UniqueCard card in allCards)
-            {
-                tier = CardTierList.GetCardTier(card.Name);
-                finalValue += (int)tier * _cardValue;
-                if (card.Deck != PatronId.TREASURY)
-                {
-                    if (potentialComboNumber.ContainsKey(card.Deck))
-                    {
-                        potentialComboNumber[card.Deck] += 1;
-                    }
-                    else
-                    {
-                        potentialComboNumber[card.Deck] = 1;
-                    }
-                }
-            }
-
-            foreach (UniqueCard card in allCardsEnemy)
-            {
-                if (card.Deck != PatronId.TREASURY)
-                {
-                    if (potentialComboNumberEnemy.ContainsKey(card.Deck))
-                    {
-                        potentialComboNumberEnemy[card.Deck] += 1;
-                    }
-                    else
-                    {
-                        potentialComboNumberEnemy[card.Deck] = 1;
-                    }
-                }
-            }
-
-            foreach (KeyValuePair<PatronId, int> entry in potentialComboNumber)
-            {
-                finalValue += (int)Math.Pow(entry.Value, _potentialComboValue);
-            }
-
-            foreach (Card card in gameState.TavernAvailableCards)
-            {
-                tier = CardTierList.GetCardTier(card.Name);
-                finalValue -= _penaltyForHighTierInTavern * (int)tier;
-                /*
-                if (potentialComboNumberEnemy.ContainsKey(card.Deck) && (potentialComboNumberEnemy[card.Deck]>4) && (tier > TierEnum.B)){
-                    finalValue -= enemyPotentialComboPenalty*(int)tier;
-                }
-                */
-            }
-
-        }
-
-        //int finalValue = gameState.CurrentPlayer.Power + gameState.CurrentPlayer.Prestige;
-        double normalizedValue = NormalizeHeuristic(finalValue);
-
-        return normalizedValue;
+        return nextMove;
     }
-
-    private double NormalizeHeuristic(int value)
+    
+    //functions to simulate moves out to end of player's turn - borrowed from MCTSBot
+    public double SimulateToEndOfPlayersTurn(InfosetNode startNode)
     {
-        double normalizedValue = ((double)value - (double)_heuristicMin) / ((double)_heuristicMax - (double)_heuristicMin);
-
-        if (normalizedValue < 0)
+        Determinisation startd = startNode.GetDeterminisation();
+        if (startNode._currentMoveFromParent.Command == CommandEnum.END_TURN)
         {
-            return 0.0;
+            return _strategy.Heuristic(startd.GetState());
         }
-
-        return normalizedValue;
+    
+        List<Move> notEndTurnPossibleMoves = NotEndTurnPossibleMoves(startd.GetMoves());
+        Move nextMove;
+        if (notEndTurnPossibleMoves.Count > 0)
+        {
+            if ((startd.GetState().BoardState == BoardState.NORMAL) && (Extensions.RandomK(0, 100000, rng) == 0))
+            {
+                nextMove = Move.EndTurn();
+            }
+            else
+            {
+                nextMove = notEndTurnPossibleMoves.PickRandom(rng);
+            }
+        }
+        else
+        {
+            nextMove = Move.EndTurn();
+        }
+    
+        var gameState = startd.GetState();
+        var (seedGameState, newMoves) = gameState.ApplyMove(nextMove);
+        nextMove = DrawNextMove(newMoves, seedGameState, rng);
+    
+        while (nextMove.Command != CommandEnum.END_TURN)
+        {
+    
+            var (newSeedGameState, newPossibleMoves) = seedGameState.ApplyMove(nextMove);
+            nextMove = DrawNextMove(newPossibleMoves, newSeedGameState, rng);
+            seedGameState = newSeedGameState;
+        }
+    
+        //MCTSBot used Heuristic(gameState) instead of Heuristic(seedGameState), looks like a bug?
+        return _strategy.Heuristic(seedGameState);
     }
-
+    
+     //taken from BestMCTS3
+    private List<Move> FilterMoves(List<Move> moves, SeededGameState gameState)
+    {
+        moves.Sort(new MoveComparer());
+        if (moves.Count == 1) return moves;
+        if (gameState.BoardState == BoardState.CHOICE_PENDING)
+        {
+            List<Move> toReturn = new();
+            switch (gameState.PendingChoice!.ChoiceFollowUp)
+            {
+                case ChoiceFollowUp.COMPLETE_TREASURY:
+                    List<Move> gold = new();
+                    foreach (Move mv in moves)
+                    {
+                        var mcm = mv as MakeChoiceMove<UniqueCard>;
+                        UniqueCard card = mcm!.Choices[0];
+                        if (card.CommonId == CardId.BEWILDERMENT) return new List<Move> { mv };
+                        if (card.CommonId == CardId.GOLD && gold.Count == 0) gold.Add(mv);
+                        if (card.Cost == 0) toReturn.Add(mv); // moze tez byc card.Type == 'Starter'
+                    }
+                    if (gold.Count == 1) return gold;
+                    if (toReturn.Count > 0) return toReturn;
+                    return new List<Move> { moves[0] };
+                case ChoiceFollowUp.DESTROY_CARDS:
+                    List<(Move, double)> choices = new();
+                    foreach (Move mv in moves)
+                    {
+                        var mcm = mv as MakeChoiceMove<UniqueCard>;
+                        if (mcm!.Choices.Count != 1) continue;
+                        choices.Add((mv, _strategy.CardEvaluation(mcm!.Choices[0], gameState)));
+                    }
+                    choices.Sort(new PairOnlySecond());
+                    List<CardId> cards = new();
+                    for (int i = 0; i < Math.Min(3, choices.Count); i++)
+                    {
+                        var mcm = choices[i].Item1 as MakeChoiceMove<UniqueCard>;
+                        cards.Add(mcm!.Choices[0].CommonId);
+                    }
+                    foreach (Move mv in moves)
+                    {
+                        var mcm = mv as MakeChoiceMove<UniqueCard>;
+                        bool flag = true;
+                        foreach (UniqueCard card in mcm!.Choices)
+                        {
+                            if (!cards.Contains(card.CommonId))
+                            {
+                                flag = false;
+                                break;
+                            }
+                        }
+                        if (flag) toReturn.Add(mv);
+                    }
+                    if (toReturn.Count > 0) return toReturn;
+                    return moves;
+                case ChoiceFollowUp.REFRESH_CARDS: // tu i tak musi byc duzo wierzcholkow i guess
+                    List<(Move, double)> possibilities = new();
+                    foreach (Move mv in moves)
+                    {
+                        var mcm = mv as MakeChoiceMove<UniqueCard>;
+                        double val = 0;
+                        foreach (UniqueCard card in mcm!.Choices)
+                        {
+                            val += _strategy.CardEvaluation(card, gameState);
+                        }
+                        possibilities.Add((mv, val));
+                    }
+                    possibilities.Sort(new PairOnlySecond());
+                    possibilities.Reverse();
+                    if (gameState.PendingChoice.MaxChoices == 3)
+                    {
+                        for (int i = 0; i < Math.Min(10, possibilities.Count); i++)
+                        {
+                            toReturn.Add(possibilities[i].Item1);
+                        }
+                    }
+                    if (gameState.PendingChoice.MaxChoices == 2)
+                    {
+                        for (int i = 0; i < Math.Min(6, possibilities.Count); i++)
+                        {
+                            toReturn.Add(possibilities[i].Item1);
+                        }
+                    }
+                    if (gameState.PendingChoice.MaxChoices == 1)
+                    {
+                        for (int i = 0; i < Math.Min(3, possibilities.Count); i++)
+                        {
+                            toReturn.Add(possibilities[i].Item1);
+                        }
+                    }
+                    if (toReturn.Count == 0) return moves;
+                    return toReturn;
+                default:
+                    return moves;
+            }
+        }
+        foreach (Move mv in moves)
+        {
+            if (mv.Command == CommandEnum.PLAY_CARD)
+            {
+                var mvCopy = mv as SimpleCardMove;
+                if (InstantPlayCards.IsInstantPlay(mvCopy!.Card.CommonId))
+                {
+                    return new List<Move> { mv };
+                }
+            }
+        }
+        return moves;
+    }
+    
+    //taken from previous years winner
+    void SelectStrategy(GameState gameState)
+    {
+        var currentPlayer = gameState.CurrentPlayer;
+        int cardCount = currentPlayer.Hand.Count + currentPlayer.CooldownPile.Count + currentPlayer.DrawPile.Count;
+        int points = gameState.CurrentPlayer.Prestige;
+        if (points >= 27 || gameState.EnemyPlayer.Prestige >= 30)
+        {
+            _strategy = new GameStrategy(cardCount, GamePhase.LateGame);
+        }
+        else if (points <= 10 && gameState.EnemyPlayer.Prestige <= 13)
+        {
+            _strategy = new GameStrategy(cardCount, GamePhase.EarlyGame);
+        }
+        else
+        {
+            _strategy = new GameStrategy(cardCount, GamePhase.MidGame);
+        }
+    }
+    
     public override void GameEnd(EndGameState state, FullGameState? finalBoardState)
     {
         double avgMovesPerTurn = _moveCounter/ (1.0 * _turnCounter);
         double avgSimsPerMove = _simsCounter / (1.0 * _moveCounter);
         double avgDepthPerMove = _depthCounter/ (1.0 * _moveCounter);
         double avgWidthFirstLayerPerMove = _widthFirstLayerCounter/ (1.0 * _moveCounter);
+        double avgMoveTimeOutsPerTurn = _moveTimeOutCounter/(1.0 * _turnCounter);
         
         string message = "Game count: " + _gameCounter.ToString();
         log.Log(finalBoardState.CurrentPlayer.PlayerID, message);
         message = "Turn Counter: " + _turnCounter.ToString();
         log.Log(finalBoardState.CurrentPlayer.PlayerID, message);
         message = "Average number of moves per turn: " + avgMovesPerTurn.ToString();
+        log.Log(finalBoardState.CurrentPlayer.PlayerID, message);
+        message = "Average number of move timeouts per turn: " + avgMoveTimeOutsPerTurn.ToString();
         log.Log(finalBoardState.CurrentPlayer.PlayerID, message);
         message = "Average number of simulations per move: " + avgSimsPerMove.ToString();
         log.Log(finalBoardState.CurrentPlayer.PlayerID, message);
@@ -514,6 +614,55 @@ public class SOISMCTS : AI
     }
 }
 
+//taken from last years winner
+// public class MoveComparer : Comparer<Move>
+// {
+//     public static ulong HashMove(Move x)
+//     {
+//         ulong hash = 0;
+//
+//         if (x.Command == CommandEnum.CALL_PATRON)
+//         {
+//             var mx = x as SimplePatronMove;
+//             hash = (ulong)mx!.PatronId;
+//         }
+//         else if (x.Command == CommandEnum.MAKE_CHOICE)
+//         {
+//             var mx = x as MakeChoiceMove<UniqueCard>;
+//             if (mx is not null)
+//             {
+//                 var ids = mx!.Choices.Select(card => (ulong)card.CommonId).OrderBy(id => id);
+//                 foreach (ulong id in ids) hash = hash * 200UL + id;
+//             }
+//             else
+//             {
+//                 var mxp = x as MakeChoiceMove<UniqueEffect>;
+//                 var ids = mxp!.Choices.Select(ef => (ulong)ef.Type).OrderBy(type => type);
+//                 foreach (ulong id in ids) hash = hash * 200UL + id;
+//                 hash += 1_000_000_000UL;
+//             }
+//         }
+//         else if (x.Command != CommandEnum.END_TURN)
+//         {
+//             var mx = x as SimpleCardMove;
+//             hash = (ulong)mx!.Card.CommonId;
+//         }
+//         return hash + 1_000_000_000_000UL * (ulong)x.Command;
+//     }
+//     public override int Compare(Move x, Move y)
+//     {
+//         ulong hx = HashMove(x);
+//         ulong hy = HashMove(y);
+//         return hx.CompareTo(hy);
+//     }
+//
+//     public static bool AreIsomorphic(Move move1, Move move2)
+//     {
+//         if (move1.Command != move2.Command) return false; // Speed up
+//         return HashMove(move1) == HashMove(move2);
+//     }
+// }
+
 //Each node corresponds to an information set for the observing player for a tree,
 //and also contains the determinisation that was used when the node was last visited in the tree 
 public class InfosetNode
@@ -526,6 +675,7 @@ public class InfosetNode
     private List<Move>? _currentMovesWithNoChildren; //stores moves from current determinsation that have no children
     private List<InfosetNode>? _compatibleChildrenInTree; //list of children compatible with current determinisation that are in the list of children
     public double TotalReward;
+    public double MaxReward;
     public int VisitCount;
     public int AvailabilityCount;
     public PlayerEnum ObservingPlayer; //observing player is assumed to be the player to play next at the root node
@@ -1226,3 +1376,185 @@ public class Determinisation
 //         
 //         return true;
 //     }
+
+ // //Heuristic 'borrowed' from MCTSBot.cs
+ //    public double Heuristic(SeededGameState gameState)
+ //    {
+ //        int finalValue = 0;
+ //        int enemyPatronFavour = 0;
+ //        foreach (KeyValuePair<PatronId, PlayerEnum> entry in gameState.PatronStates.All)
+ //        {
+ //            if (entry.Key == PatronId.TREASURY)
+ //            {
+ //                continue;
+ //            }
+ //            if (entry.Value == gameState.CurrentPlayer.PlayerID)
+ //            {
+ //                finalValue += _patronFavour;
+ //            }
+ //            else if (entry.Value == PlayerEnum.NO_PLAYER_SELECTED)
+ //            {
+ //                finalValue += _patronNeutral;
+ //            }
+ //            else
+ //            {
+ //                finalValue += _patronUnfavour;
+ //                enemyPatronFavour += 1;
+ //            }
+ //        }
+ //        if (enemyPatronFavour >= 2)
+ //        {
+ //            finalValue -= 100;
+ //        }
+ //
+ //        finalValue += gameState.CurrentPlayer.Power * _powerValue;
+ //        finalValue += gameState.CurrentPlayer.Prestige * _prestigeValue;
+ //        //finalValue += gameState.CurrentPlayer.Coins * _coinsValue;
+ //
+ //        if (gameState.CurrentPlayer.Prestige < 30)
+ //        {
+ //            TierEnum tier = TierEnum.UNKNOWN;
+ //
+ //            foreach (SerializedAgent agent in gameState.CurrentPlayer.Agents)
+ //            {
+ //                tier = CardTierList.GetCardTier(agent.RepresentingCard.Name);
+ //                finalValue += _agentOnBoardValue * (int)tier + agent.CurrentHp * _hpValue;
+ //            }
+ //
+ //            foreach (SerializedAgent agent in gameState.EnemyPlayer.Agents)
+ //            {
+ //                tier = CardTierList.GetCardTier(agent.RepresentingCard.Name);
+ //                finalValue -= _agentOnBoardValue * (int)tier + agent.CurrentHp * _hpValue + _opponentAgentsPenaltyValue;
+ //            }
+ //
+ //            List<UniqueCard> allCards = gameState.CurrentPlayer.Hand.Concat(gameState.CurrentPlayer.Played.Concat(gameState.CurrentPlayer.CooldownPile.Concat(gameState.CurrentPlayer.DrawPile))).ToList();
+ //            Dictionary<PatronId, int> potentialComboNumber = new Dictionary<PatronId, int>();
+ //            List<UniqueCard> allCardsEnemy = gameState.EnemyPlayer.Hand.Concat(gameState.EnemyPlayer.DrawPile).Concat(gameState.EnemyPlayer.Played.Concat(gameState.EnemyPlayer.CooldownPile)).ToList();
+ //            Dictionary<PatronId, int> potentialComboNumberEnemy = new Dictionary<PatronId, int>();
+ //
+ //            foreach (UniqueCard card in allCards)
+ //            {
+ //                tier = CardTierList.GetCardTier(card.Name);
+ //                finalValue += (int)tier * _cardValue;
+ //                if (card.Deck != PatronId.TREASURY)
+ //                {
+ //                    if (potentialComboNumber.ContainsKey(card.Deck))
+ //                    {
+ //                        potentialComboNumber[card.Deck] += 1;
+ //                    }
+ //                    else
+ //                    {
+ //                        potentialComboNumber[card.Deck] = 1;
+ //                    }
+ //                }
+ //            }
+ //
+ //            foreach (UniqueCard card in allCardsEnemy)
+ //            {
+ //                if (card.Deck != PatronId.TREASURY)
+ //                {
+ //                    if (potentialComboNumberEnemy.ContainsKey(card.Deck))
+ //                    {
+ //                        potentialComboNumberEnemy[card.Deck] += 1;
+ //                    }
+ //                    else
+ //                    {
+ //                        potentialComboNumberEnemy[card.Deck] = 1;
+ //                    }
+ //                }
+ //            }
+ //
+ //            foreach (KeyValuePair<PatronId, int> entry in potentialComboNumber)
+ //            {
+ //                finalValue += (int)Math.Pow(entry.Value, _potentialComboValue);
+ //            }
+ //
+ //            foreach (Card card in gameState.TavernAvailableCards)
+ //            {
+ //                tier = CardTierList.GetCardTier(card.Name);
+ //                finalValue -= _penaltyForHighTierInTavern * (int)tier;
+ //                /*
+ //                if (potentialComboNumberEnemy.ContainsKey(card.Deck) && (potentialComboNumberEnemy[card.Deck]>4) && (tier > TierEnum.B)){
+ //                    finalValue -= enemyPotentialComboPenalty*(int)tier;
+ //                }
+ //                */
+ //            }
+ //
+ //        }
+ //
+ //        //int finalValue = gameState.CurrentPlayer.Power + gameState.CurrentPlayer.Prestige;
+ //        double normalizedValue = NormalizeHeuristic(finalValue);
+ //
+ //        return normalizedValue;
+ //    }
+ //
+ //    private double NormalizeHeuristic(int value)
+ //    {
+ //        double normalizedValue = ((double)value - (double)_heuristicMin) / ((double)_heuristicMax - (double)_heuristicMin);
+ //
+ //        if (normalizedValue < 0)
+ //        {
+ //            return 0.0;
+ //        }
+ //
+ //        return normalizedValue;
+ //    }
+
+ // private double Simulate(InfosetNode startNode, int depth)
+    // {
+    //     int Count = 0;
+    //     Determinisation d = startNode.GetDeterminisation();
+    //     double bestPlayoutScore = 0;
+    //     int depthCount = 0;
+    //     double eps = 0.0001; //used to check for equality on playout scores betwwen nodes
+    //     while (d.GetState().GameEndState == null && depthCount <= depth) //GameEndState is only not null for terminal nodes
+    //     {
+    //         PlayerEnum currentPlayer = d.GetState().CurrentPlayer.PlayerID;
+    //             
+    //         //create all legal next states 
+    //         List<Determinisation> possibleDeterminisations = new List<Determinisation>();
+    //         foreach (Move move in d.GetMoves())
+    //         {
+    //             var (newSeededGameState, newPossibleMoves) = d.GetState().ApplyMove(move);
+    //             possibleDeterminisations.Add(new Determinisation(newSeededGameState, newPossibleMoves));
+    //         }
+    //
+    //         //take first move from the list, use asa  reference to capture the case where all payouts are equal for
+    //         //the next nodes
+    //         Determinisation bestd = possibleDeterminisations[0];
+    //         //double playoutScore = playoutHeuristic(bestd.GetState());
+    //         //use MCTSBOt heuristic
+    //         double playoutScore = _strategy.Heuristic(bestd.GetState());
+    //         double firstPlayoutScore = playoutScore;
+    //         bestPlayoutScore = firstPlayoutScore;
+    //
+    //         bool allequal = true;
+    //         for (var i = 1; i < possibleDeterminisations.Count; i++) //ignore the first move in this loop 
+    //         {
+    //             playoutScore = _strategy.Heuristic(possibleDeterminisations[i].GetState());
+    //             if (!(playoutScore < (firstPlayoutScore + eps) && playoutScore > (firstPlayoutScore - eps)))
+    //             {
+    //                 allequal = false;
+    //                 if (playoutScore > bestPlayoutScore)
+    //                 {
+    //                     bestPlayoutScore = playoutScore;
+    //                     bestd = possibleDeterminisations[i];
+    //                 }
+    //             }
+    //         }
+    //
+    //         //if all nodes have the same playout score chose one at random
+    //         if (allequal)
+    //         {
+    //             bestd = possibleDeterminisations.PickRandom(rng);
+    //         }
+    //
+    //         d = bestd;
+    //         if (d.GetState().CurrentPlayer.PlayerID != currentPlayer)
+    //         {
+    //             //player change has occured so increase depthcount
+    //             depthCount += 1;
+    //         }
+    //     }
+    //     return bestPlayoutScore;
+    // }
