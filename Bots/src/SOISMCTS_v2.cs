@@ -1,11 +1,8 @@
-using System.Data.SqlTypes;
 using ScriptsOfTribute;
 using ScriptsOfTribute.AI;
 using ScriptsOfTribute.Board;
 using ScriptsOfTribute.Serializers;
 using System.Diagnostics;
-using System.Dynamic;
-using System.Runtime;
 using ScriptsOfTribute.Board.Cards;
 using ScriptsOfTribute.Board.CardAction;
 using ScriptsOfTribute.utils;
@@ -38,26 +35,6 @@ public class SOISMCTS : AI
     private readonly double K = 0.7; //explore vs exploit parameter for tree policy
     private readonly int maxSimulationDepth = 0; //only explore current player, if we change this to one or greater
     //we may need to update UCB and heuritsic to reflect eneemy player turns
-    
-    // //parameters for heuristicfrom MCTSBot.cs
-    // private int _patronFavour = 50;
-    // private int _patronNeutral = 10;
-    // private int _patronUnfavour = -50;
-    // private int _coinsValue = 1;
-    // private int _powerValue = 40;
-    // private int _prestigeValue = 50;
-    // private int _agentOnBoardValue = 30;
-    // private int _hpValue = 3;
-    // private int _opponentAgentsPenaltyValue = 40;
-    // private int _potentialComboValue = 3;
-    // private int _cardValue = 10;
-    // private int _penaltyForHighTierInTavern = 2;
-    // private int _numberOfDrawsValue = 10;
-    // private int _enemyPotentialComboPenalty = 1;
-    // private int _heuristicMax = 40000; //160
-    // private int _heuristicMin = -10000;//00
-    // //int heuristicMax = 160;
-    // //int heuristicMin = 0;
     
     private GameStrategy _strategy = new(10, GamePhase.EarlyGame);
 
@@ -114,11 +91,6 @@ public class SOISMCTS : AI
             _startOfTurn = false;
             _usedTimeInTurn = TimeSpan.FromSeconds(0);
             SelectStrategy(gameState);
-        }
-
-        if (_turnCounter >= 16)
-        {
-            int i = 0;
         }
         
         Move chosenMove = null;
@@ -184,8 +156,6 @@ public class SOISMCTS : AI
                 }
 
                 //next we simulate our playouts from our expanded node 
-                //double payoutFromExpandedNode = Simulate(expandedNode, maxSimulationDepth);
-                //double payoutFromExpandedNode = SimulateToEndOfPlayersTurn(expandedNode);
                 double payoutFromExpandedNode = Simulate(expandedNode);
 
                 //next we complete the backpropagation step
@@ -204,25 +174,12 @@ public class SOISMCTS : AI
             //increase width counter
             _widthFirstLayerCounter += root.Children.Count;
 
-            // if (_turnCounter == 1 && _moveCounter == 3)
-            // {
-            //     InfosetNode node0 = root.Children[0];
-            //     InfosetNode node1 = root.Children[1];
-            //     bool test = node0.CheckEquivalentState(node1.GetDeterminisation().GetState());
-            //     int i = 0;
-            // }
-
             //finally we return the move from the root node that leads to a node with the maximum visit count
             chosenMove = chooseBestMove(root);
             
             if (chosenMove.Command == CommandEnum.END_TURN && root.GetDeterminisation().GetState().CurrentPlayer.Coins >=5)
             {
                  int i = 0;
-            }
-
-            if (chosenMove is null)
-            {
-                int i = 0;
             }
         }
         
@@ -241,8 +198,8 @@ public class SOISMCTS : AI
     public List<InfosetNode> select(InfosetNode startNode)
     { 
         //descend our infoset tree (restricted to nodes/actions compatible with the current determinisation of our start node)
-        //Each successive node is chosen using our tree policy until a node is reached such that some action from that node leads to
-        //an information set that is not currently in the tree or the node v is terminal
+        //Each successive node is chosen using our tree policy until a node is reached such that all moves from that node are not in the tree
+        //or that node is terminal
         InfosetNode bestNode = startNode;
         List<InfosetNode> cvd = startNode.GetCompatibleChildrenInTree();
         List<Move> uvd = startNode.GetMovesWithNoChildren();
@@ -250,13 +207,13 @@ public class SOISMCTS : AI
         List<InfosetNode> pathThroughTree = new List<InfosetNode>();
         pathThroughTree.Add(startNode);
         //change loop for now so that we only go as far as the current players end of turn
-        //while (bestNode.GetDeterminisation().GetState().GameEndState == null && uvd.Count == 0)
-        while(uvd.Count == 0)
+        while (bestNode.GetDeterminisation().GetState().GameEndState == null && uvd.Count == 0)
+        //while(uvd.Count == 0)
         {
             double bestVal = 0;
             foreach(InfosetNode node in cvd)
             {
-                double val = TreePolicy(node);
+                double val = node.UCB(K);
                 if (val > bestVal)
                 {
                     bestVal = val;
@@ -266,27 +223,35 @@ public class SOISMCTS : AI
             cvd = bestNode.GetCompatibleChildrenInTree();
             uvd = bestNode.GetMovesWithNoChildren();
             pathThroughTree.Add(bestNode);
-
-            if (bestNode._currentMoveFromParent.Command == CommandEnum.END_TURN)
-            {
-                break;
-            }
         }
         return pathThroughTree;
     }
 
     //uvd is the set of actions from 
-    private InfosetNode Expand(InfosetNode node)
+    private InfosetNode Expand(InfosetNode selectedNode)
     {
         //choose a move at random from our list of moves that do not have nodes in the tree
         //and add child node to tree
-        List<Move> uvd = node.GetMovesWithNoChildren();
-        Move move = uvd.PickRandom(rng);
-        var (newSeededGameState, newMoves) = node.GetDeterminisation().GetState().ApplyMove(move);
-        Determinisation newd = new Determinisation(newSeededGameState, newMoves);
-        InfosetNode newNode = node.CreateChild(move, newd);
-        
-        //return new infosetNode object, corresponding to new child containing the new determinisation
+        List<Move> uvd = selectedNode.GetMovesWithNoChildren();
+        //note we only want nodes in our tree corresponding to the current player (we do not simulate into enemy player turn)
+        //therefore we only take moves that do not include an end_turn.
+        List<Move> uvd_no_end_turn = NotEndTurnPossibleMoves(uvd);
+        Move? move = null;
+        InfosetNode? newNode = null;
+        if (uvd_no_end_turn.Count >= 1)
+        {
+            move = uvd_no_end_turn.PickRandom(rng);
+            var (newSeededGameState, newMoves) = selectedNode.GetDeterminisation().GetState().ApplyMove(move);
+            Determinisation newd = new Determinisation(newSeededGameState, newMoves);
+            newNode = selectedNode.CreateChild(move, newd);
+        }
+        else
+        {
+            //if the only way to expand is to do an end_turn and move to a node for the enemy player
+            //then we dont expand (we dont include enemy player nodes in our tree)
+            newNode = selectedNode;
+        }
+        //return new infosetNode object, corresponding to the selected node
         return newNode;
     }
 
@@ -295,12 +260,26 @@ public class SOISMCTS : AI
     public double Simulate(InfosetNode startNode)
     {
         SeededGameState gameState = startNode.GetDeterminisation().GetState();
+        
+        if (gameState.CurrentPlayer.PlayerID != startNode.ObservingPlayer)
+        {
+            int i = 0;
+        }
+        
         //List<Move> possibleMoves = node.children.ConvertAll<Move>(m => m.Item2);
+        //check that only move from startNode isn't an end turn
         List<Move> possibleMoves = startNode.GetDeterminisation().GetMoves();
+        double finalPayOff = 0;
         List<Move> notEndMoves = possibleMoves.Where(m => m.Command != CommandEnum.END_TURN).ToList();
         if (notEndMoves.Count == 0)
         {
-            return _strategy.Heuristic(startNode.GetDeterminisation().GetState());
+            finalPayOff = _strategy.Heuristic(gameState);
+            if (finalPayOff < 0.0001)
+            {
+                int i = 0;
+            }
+
+            return finalPayOff;
         }
         Move move = notEndMoves.PickRandom(rng);
     
@@ -317,7 +296,20 @@ public class SOISMCTS : AI
             {
                 move = Move.EndTurn();
             }
+
+            if (gameState.CurrentPlayer.PlayerID != startNode.ObservingPlayer)
+            {
+                int i = 0;
+            }
         }
+        
+        finalPayOff = _strategy.Heuristic(gameState);
+        if (finalPayOff < 0.0001)
+        {
+            int i = 0;
+        }
+
+        return finalPayOff;
     
         return _strategy.Heuristic(gameState);
     }
@@ -342,12 +334,6 @@ public class SOISMCTS : AI
         }
     }
     
-    private double TreePolicy(InfosetNode node)
-    {
-        double nodeUCB = node.UCB(K);
-        return nodeUCB;
-    }
-
     //chooses child from root node with highest visitation number
     public Move chooseBestMove(InfosetNode rootNode)
     {
@@ -369,7 +355,8 @@ public class SOISMCTS : AI
         Move bestMove = null;
         foreach (InfosetNode node in rootNode.Children)
         {
-            if (node.MaxReward > bestScore)
+            if (node.MaxReward >= bestScore) //note heuritsic can take a value of zero
+            //if (node.MaxReward > bestScore)
             {
                 bestScore = node.MaxReward;
                 bestMove = node._currentMoveFromParent;
@@ -383,76 +370,10 @@ public class SOISMCTS : AI
         return bestMove;
     }
     
-    //functions to simulate moves out to end of player's turn - borrowed from MCTSBot
+    //taken from MCTSBot
     private List<Move> NotEndTurnPossibleMoves(List<Move> possibleMoves)
     {
-        return possibleMoves.Where(m => m.Command != CommandEnum.END_TURN).ToList();
-    }
-    
-    //functions to simulate moves out to end of player's turn - borrowed from MCTSBot
-    private Move DrawNextMove(List<Move> possibleMoves, SeededGameState gameState, SeededRandom rng)
-    {
-        Move nextMove;
-        List<Move> notEndTurnPossibleMoves = NotEndTurnPossibleMoves(possibleMoves);
-        if (notEndTurnPossibleMoves.Count > 0)
-        {
-            if ((gameState.BoardState == BoardState.NORMAL) && (Extensions.RandomK(0, 10000, rng) == 0))
-            {
-                nextMove = Move.EndTurn();
-            }
-            else
-            {
-                nextMove = notEndTurnPossibleMoves.PickRandom(rng);
-            }
-        }
-        else
-        {
-            nextMove = Move.EndTurn();
-        }
-        return nextMove;
-    }
-    
-    //functions to simulate moves out to end of player's turn - borrowed from MCTSBot
-    public double SimulateToEndOfPlayersTurn(InfosetNode startNode)
-    {
-        Determinisation startd = startNode.GetDeterminisation();
-        if (startNode._currentMoveFromParent.Command == CommandEnum.END_TURN)
-        {
-            return _strategy.Heuristic(startd.GetState());
-        }
-    
-        List<Move> notEndTurnPossibleMoves = NotEndTurnPossibleMoves(startd.GetMoves());
-        Move nextMove;
-        if (notEndTurnPossibleMoves.Count > 0)
-        {
-            if ((startd.GetState().BoardState == BoardState.NORMAL) && (Extensions.RandomK(0, 100000, rng) == 0))
-            {
-                nextMove = Move.EndTurn();
-            }
-            else
-            {
-                nextMove = notEndTurnPossibleMoves.PickRandom(rng);
-            }
-        }
-        else
-        {
-            nextMove = Move.EndTurn();
-        }
-    
-        var gameState = startd.GetState();
-        var (seedGameState, newMoves) = gameState.ApplyMove(nextMove);
-        nextMove = DrawNextMove(newMoves, seedGameState, rng);
-    
-        while (nextMove.Command != CommandEnum.END_TURN)
-        {
-    
-            var (newSeedGameState, newPossibleMoves) = seedGameState.ApplyMove(nextMove);
-            nextMove = DrawNextMove(newPossibleMoves, newSeedGameState, rng);
-            seedGameState = newSeedGameState;
-        }
-    
-        //MCTSBot used Heuristic(gameState) instead of Heuristic(seedGameState), looks like a bug?
-        return _strategy.Heuristic(seedGameState);
+         return possibleMoves.Where(m => m.Command != CommandEnum.END_TURN).ToList();
     }
     
      //taken from BestMCTS3
@@ -614,55 +535,6 @@ public class SOISMCTS : AI
     }
 }
 
-//taken from last years winner
-// public class MoveComparer : Comparer<Move>
-// {
-//     public static ulong HashMove(Move x)
-//     {
-//         ulong hash = 0;
-//
-//         if (x.Command == CommandEnum.CALL_PATRON)
-//         {
-//             var mx = x as SimplePatronMove;
-//             hash = (ulong)mx!.PatronId;
-//         }
-//         else if (x.Command == CommandEnum.MAKE_CHOICE)
-//         {
-//             var mx = x as MakeChoiceMove<UniqueCard>;
-//             if (mx is not null)
-//             {
-//                 var ids = mx!.Choices.Select(card => (ulong)card.CommonId).OrderBy(id => id);
-//                 foreach (ulong id in ids) hash = hash * 200UL + id;
-//             }
-//             else
-//             {
-//                 var mxp = x as MakeChoiceMove<UniqueEffect>;
-//                 var ids = mxp!.Choices.Select(ef => (ulong)ef.Type).OrderBy(type => type);
-//                 foreach (ulong id in ids) hash = hash * 200UL + id;
-//                 hash += 1_000_000_000UL;
-//             }
-//         }
-//         else if (x.Command != CommandEnum.END_TURN)
-//         {
-//             var mx = x as SimpleCardMove;
-//             hash = (ulong)mx!.Card.CommonId;
-//         }
-//         return hash + 1_000_000_000_000UL * (ulong)x.Command;
-//     }
-//     public override int Compare(Move x, Move y)
-//     {
-//         ulong hx = HashMove(x);
-//         ulong hy = HashMove(y);
-//         return hx.CompareTo(hy);
-//     }
-//
-//     public static bool AreIsomorphic(Move move1, Move move2)
-//     {
-//         if (move1.Command != move2.Command) return false; // Speed up
-//         return HashMove(move1) == HashMove(move2);
-//     }
-// }
-
 //Each node corresponds to an information set for the observing player for a tree,
 //and also contains the determinisation that was used when the node was last visited in the tree 
 public class InfosetNode
@@ -754,11 +626,7 @@ public class InfosetNode
         foreach (Move move in _currentDeterminisation.GetMoves())
         {
             var (newState, newMoves) = _currentDeterminisation.GetState().ApplyMove(move);
-
-            // if (move.Command == CommandEnum.END_TURN)
-            // {
-            //     int i = 0;
-            // }
+            
             //find if new state is in tree or not
             bool found = false;
             foreach (InfosetNode child in Children)
@@ -1557,4 +1425,76 @@ public class Determinisation
     //         }
     //     }
     //     return bestPlayoutScore;
+    // }
+
+ // //functions to simulate moves out to end of player's turn - borrowed from MCTSBot
+    // private List<Move> NotEndTurnPossibleMoves(List<Move> possibleMoves)
+    // {
+    //     return possibleMoves.Where(m => m.Command != CommandEnum.END_TURN).ToList();
+    // }
+    //
+    // //functions to simulate moves out to end of player's turn - borrowed from MCTSBot
+    // private Move DrawNextMove(List<Move> possibleMoves, SeededGameState gameState, SeededRandom rng)
+    // {
+    //     Move nextMove;
+    //     List<Move> notEndTurnPossibleMoves = NotEndTurnPossibleMoves(possibleMoves);
+    //     if (notEndTurnPossibleMoves.Count > 0)
+    //     {
+    //         if ((gameState.BoardState == BoardState.NORMAL) && (Extensions.RandomK(0, 10000, rng) == 0))
+    //         {
+    //             nextMove = Move.EndTurn();
+    //         }
+    //         else
+    //         {
+    //             nextMove = notEndTurnPossibleMoves.PickRandom(rng);
+    //         }
+    //     }
+    //     else
+    //     {
+    //         nextMove = Move.EndTurn();
+    //     }
+    //     return nextMove;
+    // }
+    //
+    // //functions to simulate moves out to end of player's turn - borrowed from MCTSBot
+    // public double SimulateToEndOfPlayersTurn(InfosetNode startNode)
+    // {
+    //     Determinisation startd = startNode.GetDeterminisation();
+    //     if (startNode._currentMoveFromParent.Command == CommandEnum.END_TURN)
+    //     {
+    //         return _strategy.Heuristic(startd.GetState());
+    //     }
+    //
+    //     List<Move> notEndTurnPossibleMoves = NotEndTurnPossibleMoves(startd.GetMoves());
+    //     Move nextMove;
+    //     if (notEndTurnPossibleMoves.Count > 0)
+    //     {
+    //         if ((startd.GetState().BoardState == BoardState.NORMAL) && (Extensions.RandomK(0, 100000, rng) == 0))
+    //         {
+    //             nextMove = Move.EndTurn();
+    //         }
+    //         else
+    //         {
+    //             nextMove = notEndTurnPossibleMoves.PickRandom(rng);
+    //         }
+    //     }
+    //     else
+    //     {
+    //         nextMove = Move.EndTurn();
+    //     }
+    //
+    //     var gameState = startd.GetState();
+    //     var (seedGameState, newMoves) = gameState.ApplyMove(nextMove);
+    //     nextMove = DrawNextMove(newMoves, seedGameState, rng);
+    //
+    //     while (nextMove.Command != CommandEnum.END_TURN)
+    //     {
+    //
+    //         var (newSeedGameState, newPossibleMoves) = seedGameState.ApplyMove(nextMove);
+    //         nextMove = DrawNextMove(newPossibleMoves, newSeedGameState, rng);
+    //         seedGameState = newSeedGameState;
+    //     }
+    //
+    //     //MCTSBot used Heuristic(gameState) instead of Heuristic(seedGameState), looks like a bug?
+    //     return _strategy.Heuristic(seedGameState);
     // }
