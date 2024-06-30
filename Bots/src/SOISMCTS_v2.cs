@@ -126,20 +126,14 @@ public class SOISMCTS : AI
             //int maxIterations = 50;
             //for(int i = 0; i < maxIterations; i++)
             {
-                //if (_moveCounter == 17)
-                //{
-                //    int j = 0;
-                //}
-                
                 //in InfosetMCTS each iteration of the loop starts with a new determinisation we use to explore the same tree
                 //updating the stats for each tree node (which are information sets as seen by a chosen observer, in our
                 //case our bot)
-                // commented out for comparison against vanilla MCTS
-                //s = gameState.ToSeededGameState((ulong) rng.Next());
-                //List<Move> filteredMoves = FilterMoves(possibleMoves, s);
-                //d = new Determinisation(s, filteredMoves); //not possible moves are compatible with all seeds at the root
+                s = gameState.ToSeededGameState((ulong) rng.Next());
+                filteredMoves = FilterMoves(possibleMoves, s);
+                d = new Determinisation(s, filteredMoves); //not possible moves are compatible with all seeds at the root
                 //and set as determinisation to use for this iteration
-                //root.SetDeterminisationAndParentMove(d, null);
+                root.SetDeterminisationAndParentMove(d, null, null);
                 
                 //enter selection routine - return an array of nodes with index zero corresponding to root and final
                 //entry corresponding to the node selected for expansio
@@ -177,10 +171,6 @@ public class SOISMCTS : AI
             //finally we return the move from the root node that leads to a node with the maximum visit count
             chosenMove = chooseBestMove(root);
             
-            if (chosenMove.Command == CommandEnum.END_TURN && root.GetDeterminisation().GetState().CurrentPlayer.Coins >=5)
-            {
-                 int i = 0;
-            }
         }
         
         if (chosenMove.Command == CommandEnum.END_TURN)
@@ -261,11 +251,6 @@ public class SOISMCTS : AI
     {
         SeededGameState gameState = startNode.GetDeterminisation().GetState();
         
-        if (gameState.CurrentPlayer.PlayerID != startNode.ObservingPlayer)
-        {
-            int i = 0;
-        }
-        
         //List<Move> possibleMoves = node.children.ConvertAll<Move>(m => m.Item2);
         //check that only move from startNode isn't an end turn
         List<Move> possibleMoves = startNode.GetDeterminisation().GetMoves();
@@ -296,18 +281,10 @@ public class SOISMCTS : AI
             {
                 move = Move.EndTurn();
             }
-
-            if (gameState.CurrentPlayer.PlayerID != startNode.ObservingPlayer)
-            {
-                int i = 0;
-            }
+            
         }
         
         finalPayOff = _strategy.Heuristic(gameState);
-        if (finalPayOff < 0.0001)
-        {
-            int i = 0;
-        }
 
         return finalPayOff;
     
@@ -551,6 +528,8 @@ public class InfosetNode
     public int VisitCount;
     public int AvailabilityCount;
     public PlayerEnum ObservingPlayer; //observing player is assumed to be the player to play next at the root node
+    private List<Move>? _moveHistory; //stores the history of moves from the root to this node, based on the current determinisation (this also
+    //includes the current move from parent)
     
     //create a node using a reference determinisation for information set it encapsulates
     public InfosetNode(InfosetNode? parent, Move? moveFromParent, Determinisation d, PlayerEnum observPlayer)
@@ -568,18 +547,40 @@ public class InfosetNode
 
         Parent = parent;
         Children = new List<InfosetNode>();
+
+        List<Move> parentMoveHistory = new List<Move>();
+        if (parent is not null)
+        {
+            if (parent._moveHistory is not null)
+            {
+                parentMoveHistory = parent._moveHistory;
+            }
+        }
         
-        this.SetDeterminisationAndParentMove(d, moveFromParent);
+        this.SetDeterminisationAndParentMove(d, moveFromParent, parentMoveHistory);
     }
 
     //this method updates the current determinisation and parent move for a node, and then 
     //for each of the nodes furtehr down the tree sets to null the current determinisation
     //and parent move, so that they get recalculated when calling GetChildrenInTreeAndMovesNotInTree
-    public void SetDeterminisationAndParentMove(Determinisation? d, Move? fromParent)
+    public void SetDeterminisationAndParentMove(Determinisation? d, Move?  moveFromParent, List<Move>? parentMoveHistory)
     {
         _currentDeterminisation = d;
-        _currentMoveFromParent = fromParent;
-
+        _currentMoveFromParent = moveFromParent;
+        
+        _moveHistory = new List<Move>();
+        if (parentMoveHistory is not null)
+        {
+            parentMoveHistory.ForEach((move)=>
+            {
+                _moveHistory.Add(move);
+            });    
+        }
+        if (moveFromParent is not null)
+        {
+            _moveHistory.Add(moveFromParent);
+        }
+        
         _currentMovesWithNoChildren = null;
         _compatibleChildrenInTree = null;
     }
@@ -627,15 +628,23 @@ public class InfosetNode
         {
             var (newState, newMoves) = _currentDeterminisation.GetState().ApplyMove(move);
             
+            //create move history to newState
+            List<Move> moveHistoryToState = new List<Move>();
+            _moveHistory.ForEach((moveItem)=>
+            {
+                moveHistoryToState.Add(moveItem);
+            });    
+            moveHistoryToState.Add(move);
+            
             //find if new state is in tree or not
             bool found = false;
             foreach (InfosetNode child in Children)
             {
-                if (child.CheckEquivalentState(newState, move))
+                if (child.CheckEquivalentState(newState, moveHistoryToState))
                 {
                     //found child node that represents an information set containing equivalent states
                     found = true;
-                    child.SetDeterminisationAndParentMove(new Determinisation(newState, newMoves), move);
+                    child.SetDeterminisationAndParentMove(new Determinisation(newState, newMoves), move, this._moveHistory);
                     _compatibleChildrenInTree.Add(child);
                     break;
                 }
@@ -648,7 +657,7 @@ public class InfosetNode
         }
     }
     
-    public InfosetNode CreateChild(Move parentMove, Determinisation newd)
+    public InfosetNode CreateChild(Move? parentMove, Determinisation newd)
     {
         //TODO::this needs to add an information set node that is appropriate
         //for the observing player. Dont think this matters, as we are using a seeded game state anyway......
@@ -656,7 +665,7 @@ public class InfosetNode
         Children.Add(childNode);
         
         //also need to add to list of compatible children as this funciton is called when expanding the tree 
-        //and hence this child node is be definition compatibel with it's parent
+        //and hence this child node is be definition compatible with it's parent
         this._compatibleChildrenInTree.Add(childNode);
         
         //also need to remove this parent move form the list of moves not in the tree
@@ -666,17 +675,140 @@ public class InfosetNode
     }
     
     //check if a state is part of the equivalence class for this node
-    public bool CheckEquivalentState(SeededGameState state, Move parentMove)
+    public bool CheckEquivalentState(SeededGameState state, List<Move>? moveHistoryToState)
     {
         //to check whether our states are equivalent we need to identify information visible to the observing player
         //and ensure that is the same in both cases.
         //if (!sameVisibleInfo(state))
         //    return false;
+
+        // if (!simpleVisibleInfo(state)) //12% win rate
+        //     return false;
         
-        //for comparison against standard MCTS
-        if (!(this.EqualsMove(_currentMoveFromParent, parentMove)))
+        //open loop MCTS - to implemeht this we check all actions from node to current state and if they are the same
+        //up to permutation we say the states are the same
+        if (!openLoopMCTS(moveHistoryToState))
             return false;
         
+        // //for comparison against standard MCTS
+        // if (!(this.EqualsMove(_currentMoveFromParent, parentMove)))
+        //     return false;
+        
+        return true;
+    }
+
+    public bool openLoopMCTS(List<Move>? moveHistory)
+    {
+        //need to check that all moves are the same for the current player (which we also assume is the observing player)
+        //we also check that moves are the same up to a permutation.
+        if (moveHistory.Count > 0)
+        {
+            int i = 0;
+        }
+        if (!BespokePermutationsCheck<Move>(this._moveHistory, moveHistory))
+            return false;
+
+        return true;
+    }
+    
+     public bool simpleVisibleInfo(SeededGameState state)
+    {
+        //check current player is the same in both states
+        PlayerEnum statePlayerID = state.CurrentPlayer.PlayerID;
+        PlayerEnum refStatePlayerID = _refState.CurrentPlayer.PlayerID;
+        if (statePlayerID != refStatePlayerID)
+            return false;
+        
+        ////////////check information that is visible only to observing payer//////////////
+        SerializedPlayer observingPlayerInRefState;
+        if (ObservingPlayer == _refState.CurrentPlayer.PlayerID)
+        {
+            observingPlayerInRefState = _refState.CurrentPlayer;
+        }
+        else
+        {
+            observingPlayerInRefState = _refState.EnemyPlayer;
+        }
+        
+        SerializedPlayer observingPlayerInState;
+        if (ObservingPlayer == state.CurrentPlayer.PlayerID)
+        {
+            observingPlayerInState = state.CurrentPlayer;
+        }
+        else
+        {
+            observingPlayerInState = state.EnemyPlayer;
+        }
+        
+        //check that the hand of the observing player is the same 
+        //Cant use the Equals function defined in the UniqueCard class here since it use the UniqueID,
+        //so if we have two gold cards which have different IDs this equals funciton would return false,
+        //wheraas here we just need to ensure the card types are the same 
+        if (!BespokePermutationsCheck<UniqueCard>(observingPlayerInState.Hand, observingPlayerInRefState.Hand))
+            return false;
+        
+        //check that known upcoming draws for the observing player are the same (some cards have effects that let a player
+        //know what is about to be drawn)
+        if (!BespokePermutationsCheck<UniqueCard>(observingPlayerInState.KnownUpcomingDraws, observingPlayerInRefState.KnownUpcomingDraws))
+            return false;
+        
+        //////////Now check information visible to both observing and non-observing players/////////////
+        
+        //check board state is the same (TODO::what does this do?)
+        //if (!state.BoardState.Equals(_refState.BoardState))
+        //    return false;
+        
+        //check coins are the same in both states for both players
+        if (state.CurrentPlayer.Coins != _refState.CurrentPlayer.Coins |
+            state.EnemyPlayer.Coins != _refState.EnemyPlayer.Coins)
+            return false;
+        
+        //check prestige is the same in both states for both players
+        if (state.CurrentPlayer.Power != _refState.CurrentPlayer.Power |
+            state.EnemyPlayer.Power != _refState.EnemyPlayer.Power)
+            return false;
+        
+        //check power is the same in both states for both players
+        if (state.CurrentPlayer.Power != _refState.CurrentPlayer.Power |
+            state.EnemyPlayer.Power != _refState.EnemyPlayer.Power)
+            return false;
+        
+        //check identical patron status. So for the list of patron for this games we check that the favour status for
+        //each patron is the same between our states
+        foreach(PatronId id in state.Patrons)
+        {
+            if (!(state.PatronStates.All[id].Equals(_refState.PatronStates.All[id])))
+                return false;
+        }
+    
+        //check tavern cards on board are the same 
+        if (!BespokePermutationsCheck<UniqueCard>(state.TavernAvailableCards,_refState.TavernAvailableCards))
+            return false;
+        
+        //check played cards are the same (TODO::do these need to be in the same order)? Might be a good idea to check played
+        //cards only for the observing player here, as the detereminisations will cause the enemy player to play different cards
+        //on each iteration of the MCTS loop, greatly increasing the branching factor. Also observing players decisions
+        //are probably not that affected by what the othe rplayer has done (tales of tribute is probably abit like dominion
+        //in that respect
+        if (!(BespokeEqualsCheck<UniqueCard>(state.CurrentPlayer.Played,_refState.CurrentPlayer.Played) 
+              && BespokeEqualsCheck<UniqueCard>(state.EnemyPlayer.Played,_refState.EnemyPlayer.Played)))
+            return false;
+        
+        //check agents on the board are the same for both players . Unfortunately the agent objects have
+        //not had their Equals operation over-ridden and we cant use the default operator as it just check memory address
+        //and we will want to say two instances of the same agent are the same (if they belong to the same player)
+        //so we use a specific function for this check
+        if (!(BespokePermutationsCheck<SerializedAgent>(state.CurrentPlayer.Agents, _refState.CurrentPlayer.Agents) 
+              && BespokePermutationsCheck<SerializedAgent>(state.EnemyPlayer.Agents, _refState.EnemyPlayer.Agents)))
+            return false;
+        
+        //The cooldown pile both is visible for both players, as they will have seen the cards being played previously
+        //Note, this could be an expensive action
+        if (!(BespokePermutationsCheck<UniqueCard>(state.CurrentPlayer.CooldownPile, _refState.CurrentPlayer.CooldownPile) 
+              && BespokePermutationsCheck<UniqueCard>(state.EnemyPlayer.CooldownPile,_refState.EnemyPlayer.CooldownPile)))
+            return false;
+        
+        //if we survive all our tests return true
         return true;
     }
     
@@ -838,11 +970,12 @@ public class InfosetNode
     }
     
     // Override Equals method to define equality (this allows search on lists of InfosetNodes)
+    //is this still needed?
     public override bool Equals(object obj)
     {
         InfosetNode node = (InfosetNode)obj;
         
-        return CheckEquivalentState(node._refState, node._currentMoveFromParent);
+        return CheckEquivalentState(node._refState, node._moveHistory);
     }
 
     //function to check if set of cards are the same up to ordering 
@@ -899,9 +1032,14 @@ public class InfosetNode
         return true;
     }
 
+    //this is probably very slow!
     public bool EqualsOverride<T>(T item1, T item2)
     {
-        if ((item1 is SerializedAgent) && (item2 is SerializedAgent))
+        if ((item1 is Move) && (item2 is Move))
+        {
+            return EqualsMove(item1 as Move, item2 as Move);
+        }
+        else if ((item1 is SerializedAgent) && (item2 is SerializedAgent))
         {
             return EqualsAgent(item1 as SerializedAgent, item2 as SerializedAgent);
         }
@@ -917,6 +1055,15 @@ public class InfosetNode
         {
             throw new Exception("Invalid use  of EqualsOverride");
         }
+    }
+    
+    //we need to check equality on moves as part of open loop MCTS algorithm
+    private bool EqualsMove(Move move1, Move move2)
+    {
+        if (!MoveComparer.AreIsomorphic(move1, move2))
+            return false;
+
+        return true;
     }
     
     //we need function to define equality between Agents, Pending choices and GameEndState as these are not provided by game engine
@@ -945,14 +1092,14 @@ public class InfosetNode
         return true;
     }
     
-    //check for same move
-    private bool EqualsMove(Move move1, Move move2)
-    {
-        if (move1.Command != move2.Command)
-            return false;
-
-        return true;
-    }
+    // //check for same move
+    // private bool EqualsMove(Move move1, Move move2)
+    // {
+    //     if (move1.Command != move2.Command)
+    //         return false;
+    //
+    //     return true;
+    // }
 
     private bool EqualsGameEndState(EndGameState? state1, EndGameState? state2)
     {
