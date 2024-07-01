@@ -510,7 +510,7 @@ public class SOISMCTS : AI
         log.Log(finalBoardState.CurrentPlayer.PlayerID, message);
         message = "Game end reason: " + state.Reason.ToString();
         log.Log(finalBoardState.CurrentPlayer.PlayerID, message);
-        message = "ttoal number of sims across all games: " + _totalSimsCounter.ToString();
+        message = "total number of sims across all games: " + _totalSimsCounter.ToString();
         log.Log(finalBoardState.CurrentPlayer.PlayerID, message);
         
         //prepare for next game
@@ -688,13 +688,13 @@ public class InfosetNode
         //if (!sameVisibleInfo(state))
         //    return false;
 
-        if (!simpleVisibleInfo(state)) //12% win rate
-             return false;
+        // if (!simpleVisibleInfo(state)) //12% win rate
+        //      return false;
         
         //open loop MCTS - to implemeht this we check all actions from node to current state and if they are the same
         //up to permutation we say the states are the same
-        //if (!openLoopMCTS(moveHistoryToState))
-        //    return false;
+        if (!openLoopMCTS(moveHistoryToState))
+            return false;
         
         // //for comparison against standard MCTS
         // if (!(this.EqualsMove(_currentMoveFromParent, parentMove)))
@@ -707,13 +707,12 @@ public class InfosetNode
     {
         //need to check that all moves are the same for the current player (which we also assume is the observing player)
         //we also check that moves are the same up to a permutation.
-        if (moveHistory.Count > 0)
-        {
-            int i = 0;
-        }
-        if (!BespokePermutationsCheck<Move>(this._moveHistory, moveHistory))
-            return false;
+        if (!checkMovesEqualUpToPermutation(this._moveHistory, moveHistory))
+             return false;
 
+        // if (!checkMovesListAreEqual(this._moveHistory, moveHistory))
+        //     return false;
+        
         return true;
     }
     
@@ -750,12 +749,12 @@ public class InfosetNode
         //Cant use the Equals function defined in the UniqueCard class here since it use the UniqueID,
         //so if we have two gold cards which have different IDs this equals funciton would return false,
         //wheraas here we just need to ensure the card types are the same 
-        if (!BespokePermutationsCheck<UniqueCard>(observingPlayerInState.Hand, observingPlayerInRefState.Hand))
+        if (!checkCardsEqualUpToPermutation(observingPlayerInState.Hand, observingPlayerInRefState.Hand))
             return false;
         
         //check that known upcoming draws for the observing player are the same (some cards have effects that let a player
         //know what is about to be drawn)
-        if (!BespokePermutationsCheck<UniqueCard>(observingPlayerInState.KnownUpcomingDraws, observingPlayerInRefState.KnownUpcomingDraws))
+        if (!checkCardsEqualUpToPermutation(observingPlayerInState.KnownUpcomingDraws, observingPlayerInRefState.KnownUpcomingDraws))
             return false;
         
         //////////Now check information visible to both observing and non-observing players/////////////
@@ -788,7 +787,7 @@ public class InfosetNode
         }
     
         //check tavern cards on board are the same 
-        if (!BespokePermutationsCheck<UniqueCard>(state.TavernAvailableCards,_refState.TavernAvailableCards))
+        if (!checkCardsEqualUpToPermutation(state.TavernAvailableCards,_refState.TavernAvailableCards))
             return false;
         
         //check played cards are the same (TODO::do these need to be in the same order)? Might be a good idea to check played
@@ -810,8 +809,8 @@ public class InfosetNode
         
         //The cooldown pile both is visible for both players, as they will have seen the cards being played previously
         //Note, this could be an expensive action
-        if (!(BespokePermutationsCheck<UniqueCard>(state.CurrentPlayer.CooldownPile, _refState.CurrentPlayer.CooldownPile) 
-              && BespokePermutationsCheck<UniqueCard>(state.EnemyPlayer.CooldownPile,_refState.EnemyPlayer.CooldownPile)))
+        if (!(checkCardsEqualUpToPermutation(state.CurrentPlayer.CooldownPile, _refState.CurrentPlayer.CooldownPile) 
+              && checkCardsEqualUpToPermutation(state.EnemyPlayer.CooldownPile,_refState.EnemyPlayer.CooldownPile)))
             return false;
         
         //if we survive all our tests return true
@@ -975,6 +974,73 @@ public class InfosetNode
         return true;
     }
     
+    //simple function to check that moves are the same up to a permutation
+    public bool checkMovesEqualUpToPermutation(List<Move> list1, List<Move> list2)
+    {
+        if (list1.Count != list2.Count)
+            return false;
+
+        if (list1.Count == 0)
+            return true;
+
+        List<ulong> list1HashCodes = list1.Select(MoveComparer.HashMove).ToList();
+        List<ulong> list2HashCodes = list2.Select(MoveComparer.HashMove).ToList();
+        
+        var sortedList1 = list1HashCodes.OrderBy(x => x).ToList();
+        var sortedList2 = list2HashCodes.OrderBy(x => x).ToList();
+
+        for (int i = 0; i < sortedList1.Count; i++)
+        {
+            if (sortedList1[i] != sortedList2[i])
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+    
+    //simple function to check that lists of moves are the same
+    public bool checkMovesListAreEqual(List<Move> list1, List<Move> list2)
+    {
+        if (list1.Count != list2.Count)
+            return false;
+
+        if (list1.Count == 0)
+            return true;
+
+        for (int index = 0; index < list1.Count; index++)
+        {
+            if (!MoveComparer.AreIsomorphic(list1[index], list2[index]))
+                return false;
+        }
+
+        return true;
+    }
+    
+    //simple function to check if lists of unique cards are equal up to a permutation
+    public bool checkCardsEqualUpToPermutation(List<UniqueCard> list1, List<UniqueCard> list2)
+    {
+        if (list1.Count != list2.Count)
+            return false;
+
+        if (list1.Count == 0)
+            return true;
+        
+        var sortedList1 = list1.OrderBy(x => x.CommonId).ToList();
+        var sortedList2 = list2.OrderBy(x => x.CommonId).ToList();
+
+        for (int i = 0; i < sortedList1.Count; i++)
+        {
+            if (sortedList1[i].CommonId != sortedList2[i].CommonId)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+    
     // Override Equals method to define equality (this allows search on lists of InfosetNodes)
     //is this still needed?
     public override bool Equals(object obj)
@@ -1092,7 +1158,10 @@ public class InfosetNode
     //check only card type when seeing if they are equal
     private bool EqualsUniqueCard(UniqueCard card1, UniqueCard card2)
     {
-        if (card1.GetType() != card2.GetType())
+        //if (card1.GetType() != card2.GetType())
+        //    return false;
+        
+        if (card1.CommonId != card2.CommonId)
             return false;
 
         return true;
