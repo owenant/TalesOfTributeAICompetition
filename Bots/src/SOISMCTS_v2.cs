@@ -27,6 +27,7 @@ public class SOISMCTS : AI
     private static int _widthFirstLayerCounter = 0; //number of nodes in first layer of tree
     private static int _widthSecondLayerCounter = 0; //number of nodes in second layer of tree
     private static int _moveTimeOutCounter = 0; //number of times we time out a move across a game
+    private static int _totalSimsCounter = 0; //tracks total number of sims across all games played in session
     
     //counter for number of times play method is called
     private int playMethodCallCount = 0;
@@ -156,6 +157,7 @@ public class SOISMCTS : AI
                 BackPropagation(payoutFromExpandedNode, pathThroughTree);
 
                 _simsCounter += 1;
+                _totalSimsCounter += 1;
                 //noIterations += 1;
 
                 maxDepthForThisMove = Math.Max(maxDepthForThisMove, pathThroughTree.Count);
@@ -506,6 +508,10 @@ public class SOISMCTS : AI
         log.Log(finalBoardState.CurrentPlayer.PlayerID, message);
         message = "Winner: " + state.Winner.ToString();
         log.Log(finalBoardState.CurrentPlayer.PlayerID, message);
+        message = "Game end reason: " + state.Reason.ToString();
+        log.Log(finalBoardState.CurrentPlayer.PlayerID, message);
+        message = "ttoal number of sims across all games: " + _totalSimsCounter.ToString();
+        log.Log(finalBoardState.CurrentPlayer.PlayerID, message);
         
         //prepare for next game
         this.PrepareForGame();
@@ -682,13 +688,13 @@ public class InfosetNode
         //if (!sameVisibleInfo(state))
         //    return false;
 
-        // if (!simpleVisibleInfo(state)) //12% win rate
-        //     return false;
+        if (!simpleVisibleInfo(state)) //12% win rate
+             return false;
         
         //open loop MCTS - to implemeht this we check all actions from node to current state and if they are the same
         //up to permutation we say the states are the same
-        if (!openLoopMCTS(moveHistoryToState))
-            return false;
+        //if (!openLoopMCTS(moveHistoryToState))
+        //    return false;
         
         // //for comparison against standard MCTS
         // if (!(this.EqualsMove(_currentMoveFromParent, parentMove)))
