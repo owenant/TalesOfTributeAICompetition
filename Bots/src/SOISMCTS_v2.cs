@@ -29,11 +29,14 @@ public class SOISMCTS : AI
     private static int _moveTimeOutCounter = 0; //number of times we time out a move across a game
     private static int _totalSimsCounter = 0; //tracks total number of sims across all games played in session
     
+    //to keep track of node and move chosen in each move to be used to create root for next move
+    private Tuple<InfosetNode?, Move?> _prevChosenNodeAndMove;
+    
     //counter for number of times play method is called
     private int playMethodCallCount = 0;
     
     //parameters for MCTS
-    private readonly double K = 0.7; //explore vs exploit parameter for tree policy
+    private readonly double K = Math.Sqrt(2); //0.7; //explore vs exploit parameter for tree policy
     private readonly int maxSimulationDepth = 0; //only explore current player, if we change this to one or greater
     //we may need to update UCB and heuritsic to reflect eneemy player turns
     
@@ -92,6 +95,8 @@ public class SOISMCTS : AI
             _startOfTurn = false;
             _usedTimeInTurn = TimeSpan.FromSeconds(0);
             SelectStrategy(gameState);
+
+            _prevChosenNodeAndMove = new Tuple<InfosetNode, Move>(null, null);
         }
         
         Move chosenMove = null;
@@ -102,16 +107,39 @@ public class SOISMCTS : AI
             _usedTimeInTurn = TimeSpan.FromSeconds(0);
             _turnCounter += 1;
             _moveCounter += 1;
+            _prevChosenNodeAndMove = new Tuple<InfosetNode, Move>(null, null);
             return possibleMoves[0];
         }
         
         //Initialise a root node
-        PlayerEnum observingPlayer = gameState.CurrentPlayer.PlayerID; //observing player for information sets in tree
-        SeededGameState s = gameState.ToSeededGameState((ulong) rng.Next());
-        List<Move> filteredMoves = FilterMoves(possibleMoves, s); //filter on obvious moves to play
-        Determinisation d = new Determinisation(s, filteredMoves); //note that all possible moves are compatible with all seeds at the root
-        InfosetNode root = new InfosetNode(null, null, d, observingPlayer);
-
+        InfosetNode? root = null;
+        // if (_prevChosenNodeAndMove.Item1 is not null)
+        // {
+        //     InfosetNode lastChosenNode = _prevChosenNodeAndMove.Item1;
+        //     Move chosenMoveFromLastNode = _prevChosenNodeAndMove.Item2;
+        //
+        //     //does a child node already exist?
+        //     foreach (InfosetNode child in lastChosenNode.Children)
+        //     {
+        //         if (MoveComparer.AreIsomorphic(child._currentMoveFromParent, chosenMoveFromLastNode))
+        //         {
+        //             root = child;//Do I need to take a copy here?
+        //             root.Parent = null;
+        //             root._currentMoveFromParent = null;
+        //             break;
+        //         }
+        //     }
+        // }
+        
+        if (root is null)
+        {
+            PlayerEnum observingPlayer = gameState.CurrentPlayer.PlayerID; //observing player for information sets in tree
+            SeededGameState s = gameState.ToSeededGameState((ulong) rng.Next());
+            List<Move> filteredMoves = FilterMoves(possibleMoves, s); //filter on obvious moves to play
+            Determinisation d = new Determinisation(s, filteredMoves); //note that all possible moves are compatible with all seeds at the root
+            root = new InfosetNode(null, null, d, observingPlayer);
+        }
+        
         if (_usedTimeInTurn + _timeForMoveComputation >= _turnTimeout)
         {
             _moveTimeOutCounter += 1;
@@ -130,9 +158,9 @@ public class SOISMCTS : AI
                 //in InfosetMCTS each iteration of the loop starts with a new determinisation we use to explore the same tree
                 //updating the stats for each tree node (which are information sets as seen by a chosen observer, in our
                 //case our bot)
-                s = gameState.ToSeededGameState((ulong) rng.Next());
-                filteredMoves = FilterMoves(possibleMoves, s);
-                d = new Determinisation(s, filteredMoves); //not possible moves are compatible with all seeds at the root
+                SeededGameState s = gameState.ToSeededGameState((ulong) rng.Next());
+                List<Move> filteredMoves = FilterMoves(possibleMoves, s);
+                Determinisation d = new Determinisation(s, filteredMoves); //not possible moves are compatible with all seeds at the root
                 //and set as determinisation to use for this iteration
                 root.SetDeterminisationAndParentMove(d, null, null);
                 
@@ -172,16 +200,17 @@ public class SOISMCTS : AI
 
             //finally we return the move from the root node that leads to a node with the maximum visit count
             chosenMove = chooseBestMove(root);
-            
         }
         
+        _prevChosenNodeAndMove = new Tuple<InfosetNode, Move>(root, chosenMove);
         if (chosenMove.Command == CommandEnum.END_TURN)
         {
             _startOfTurn = true;
             _turnCounter += 1;
             _usedTimeInTurn = TimeSpan.FromSeconds(0);
+            _prevChosenNodeAndMove = new Tuple<InfosetNode, Move>(null, null);
         }
-        
+
         _moveCounter += 1;
         return chosenMove;
     }
@@ -589,6 +618,27 @@ public class InfosetNode
         
         _currentMovesWithNoChildren = null;
         _compatibleChildrenInTree = null;
+        
+        // //if this node has children then we need to set _currentMovesWithNoChildren and _compatibleChildrenInTree to null
+        // //for them too. These are only recalculated as needed
+        // foreach (InfosetNode child in Children)
+        // {
+        //     child.clearDeterminisation();
+        // }
+    }
+
+    private void clearDeterminisation()
+    {
+        //_currentDeterminisation = null;
+        //_currentMoveFromParent = null;
+        //_moveHistory = new List<Move>();
+        _currentMovesWithNoChildren = null;
+        _compatibleChildrenInTree = null;
+        
+        foreach (InfosetNode child in Children)
+        {
+            child.clearDeterminisation();
+        }
     }
 
     public Determinisation? GetDeterminisation()
@@ -674,7 +724,7 @@ public class InfosetNode
         //and hence this child node is be definition compatible with it's parent
         this._compatibleChildrenInTree.Add(childNode);
         
-        //also need to remove this parent move form the list of moves not in the tree
+        //also need to remove this parent move from the list of moves not in the tree
         this._currentMovesWithNoChildren.Remove(parentMove);
 
         return childNode;
