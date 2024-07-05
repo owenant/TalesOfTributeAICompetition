@@ -52,8 +52,8 @@ public class SOISMCTS : AI
         
         //seed random number generator
         long seed = DateTime.Now.Ticks;
-        rng = new(123);  
-        //rng = new((ulong)seed); 
+        //rng = new(123);  
+        rng = new((ulong)seed); 
         
         //create logger object
         log = new Logger();
@@ -142,9 +142,14 @@ public class SOISMCTS : AI
                 InfosetNode selectedNode = pathThroughTree[pathThroughTree.Count -1];
                 List<Move> uvd = selectedNode.GetMovesWithNoChildren();
                 InfosetNode expandedNode = selectedNode;
-                if (uvd.Count != 0 && !expandedNode._endTurn)
+                
+                //dont expand an end_turn node
+                if (!selectedNode._endTurn)
                 {
-                    expandedNode = Expand(selectedNode, pathThroughTree);
+                    if (uvd.Count != 0)
+                    {
+                        expandedNode = Expand(selectedNode, pathThroughTree);
+                    }
                 }
 
                 //next we simulate our playouts from our expanded node 
@@ -216,6 +221,12 @@ public class SOISMCTS : AI
             cvd = bestNode.GetCompatibleChildrenInTree();
             uvd = bestNode.GetMovesWithNoChildren();
             pathThroughTree.Add(bestNode);
+
+            //dont continue to select past an end_turn node
+            if (bestNode._endTurn)
+            {
+                break;
+            }
         }
         return pathThroughTree;
     }
