@@ -123,7 +123,7 @@ public class SOISMCTS : AI
             //Stopwatch timer = new Stopwatch();
             //timer.Start();
             //while (timer.Elapsed < _timeForMoveComputation)
-            int maxIterations = 500;
+            int maxIterations = 2500;
             for(int i = 0; i < maxIterations; i++)
             {
                 //in InfosetMCTS each iteration of the loop starts with a new determinisation, which we use to explore the same tree
@@ -359,8 +359,6 @@ public class SOISMCTS : AI
      //taken from BestMCTS3
     private List<Move> FilterMoves(List<Move> moves, SeededGameState gameState)
     {
-        return moves;
-        
         moves.Sort(new MoveComparer());
         if (moves.Count == 1) return moves;
         if (gameState.BoardState == BoardState.CHOICE_PENDING)
