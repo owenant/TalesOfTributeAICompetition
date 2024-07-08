@@ -16,7 +16,7 @@ public class SOISMCTS : AI
     //parameters for computational budget
     private TimeSpan _usedTimeInTurn = TimeSpan.FromSeconds(0);
     private TimeSpan _timeForMoveComputation = TimeSpan.FromSeconds(0.3);
-    private readonly TimeSpan _turnTimeout = TimeSpan.FromSeconds(29.9);
+    private readonly TimeSpan _turnTimeout = TimeSpan.FromSeconds(9.9);
     
     //logger and random seed
     private SeededRandom rng; 
@@ -49,14 +49,19 @@ public class SOISMCTS : AI
     //Timer for each game
     private TimeSpan _totalTimeForGame;
     
+    //parameters for re-using tree between moves
+    private bool _treeReuse = true;
+    private bool _randomDeterminisations = true;
+    private InfosetNode? _reusedRootNode;
+    
     private void PrepareForGame()
     { 
         //if any agent set-up needed it can be done here
         
         //seed random number generator
         long seed = DateTime.Now.Ticks;
-        rng = new(123);  
-        //rng = new((ulong)seed); 
+        //rng = new(123);  
+        rng = new((ulong)seed); 
         
         //create logger object
         log = new Logger();
@@ -79,6 +84,9 @@ public class SOISMCTS : AI
         
         //initialise timer for this game
         _totalTimeForGame = TimeSpan.FromSeconds(0);
+        
+        //at start of game reused tree node is set to null
+        _reusedRootNode = null;
     }
 
     public SOISMCTS()
@@ -99,7 +107,6 @@ public class SOISMCTS : AI
         
         if (_startOfTurn)
         {
-            _startOfTurn = false;
             _usedTimeInTurn = TimeSpan.FromSeconds(0);
             SelectStrategy(gameState);
         }
@@ -118,10 +125,21 @@ public class SOISMCTS : AI
         //Initialise a root node
         SeededGameState s = gameState.ToSeededGameState((ulong) rng.Next());
         List<Move> filteredMoves = FilterMoves(possibleMoves, s);
-        Determinisation d = new Determinisation(s, filteredMoves); //not possible moves are compatible with all seeds at the root
-        InfosetNode root = new InfosetNode(null, null, d);
+        Determinisation d = new Determinisation(s, filteredMoves);
+        InfosetNode? root = null;
+        if (_treeReuse && !_startOfTurn)
+        {
+            root = _reusedRootNode;
+            root.SetCurrentDeterminisationAndMoveHistory(d, null);   
+        }
+        else
+        {
+            root = new InfosetNode(null, null, d);
+        }
+        _startOfTurn = false;
         
         Move chosenMove = null;
+        InfosetNode nextNode = null;
         if (_usedTimeInTurn + _timeForMoveComputation >= _turnTimeout)
         {
             _moveTimeOutCounter += 1;
@@ -130,19 +148,22 @@ public class SOISMCTS : AI
         else
         {
             int maxDepthForThisMove = 0;
-            //Stopwatch timer = new Stopwatch();
-            //timer.Start();
-            //while (timer.Elapsed < _timeForMoveComputation)
-            int maxIterations = 2500;
-            for(int i = 0; i < maxIterations; i++)
+            Stopwatch timer = new Stopwatch();
+            timer.Start();
+            while (timer.Elapsed < _timeForMoveComputation)
+            //int maxIterations = 2500;
+            //for(int i = 0; i < maxIterations; i++)
             {
                 //in InfosetMCTS each iteration of the loop starts with a new determinisation, which we use to explore the same tree
                 //updating the stats for each tree node
-                // s = gameState.ToSeededGameState((ulong) rng.Next());
-                // filteredMoves = FilterMoves(possibleMoves, s);
-                // d = new Determinisation(s, filteredMoves); 
-                // //and set as determinisation to use for this iteration
-                // root.SetCurrentDeterminisationAndMoveHistory(d, null);   
+                if (_randomDeterminisations)
+                {
+                    s = gameState.ToSeededGameState((ulong) rng.Next());
+                    filteredMoves = FilterMoves(possibleMoves, s);
+                    d = new Determinisation(s, filteredMoves); 
+                    //and set as determinisation to use for this iteration
+                    root.SetCurrentDeterminisationAndMoveHistory(d, null); 
+                }
                 
                 //enter selection routine - return an array of nodes with index zero corresponding to root and final
                 //entry corresponding to the node selected for expansion
@@ -193,8 +214,8 @@ public class SOISMCTS : AI
                 _widthTreeLayers[i] += treeWidthForEachLayerForThisMove[i];
             }
 
-            //finally we return the move from the root node that leads to a node with the maximum visit count
-            chosenMove = chooseBestMove(root);
+            //finally we return the move from the root node that corresponds ot the best move
+            (chosenMove, nextNode) = chooseBestMove(root);
         }
         
         if (chosenMove.Command == CommandEnum.END_TURN)
@@ -207,7 +228,28 @@ public class SOISMCTS : AI
         moveTimer.Stop();
         _totalTimeForGame += moveTimer.Elapsed;
         _moveCounter += 1;
+        
+        //set-up root node for next move
+        if (_treeReuse)
+        {
+            _reusedRootNode = prepareRootNodeForNextIteration(chosenMove, nextNode);
+        }
+        
         return chosenMove;
+    }
+
+    public InfosetNode prepareRootNodeForNextIteration(Move move, InfosetNode node)
+    {
+        //to prepare a node for re-use in the next iteration we need to do the following things
+        //1. Set it's parent to null
+        //2. Remove the move used ot reach this node from it's move history and all it's children's move histories.
+        //Note current determinisations can be ignored as tehyw ill be reset in the next iteration
+        node.Parent = null; //clear parent
+        int layer = node.GetRefMoveHistoryLength();
+        node.clearRefHistory();
+        node.removeMovesFromChildrenMoveHistory(layer); //clear reference move history as this node has now become the root.
+
+        return node;
     }
     
     //returns the selected path through the tree, and also the children in tree and move not in tree for the final selected node
@@ -334,7 +376,7 @@ public class SOISMCTS : AI
             node.MaxReward = Math.Max(finalPayout, node.MaxReward);
             node.AvailabilityCount += 1;
             //by definition the final node in the path through the tree wont have any compatible children in the tree
-            //to see this there are two case, 1. where selected node has uvd.count =0 (and the epxanded node is the same as the selected node
+            //to see this there are two case, 1. where selected node has uvd.count =0 (and the expanded node is the same as the selected node
             //, in which case we should be in an end game state and there are no further children to include in the tree
             //or 2. uvd.count is not zero for the sected node, and the expanded node has just been added into the tree in which case
             //again we have no compatible children in the tree
@@ -348,35 +390,33 @@ public class SOISMCTS : AI
         }
     }
     
-    //chooses child from root node with highest visitation number
-    public Move chooseBestMove(InfosetNode rootNode)
+    //chooses child from root node with highest visitation number, returns that node and the move to get to that node
+    public (Move, InfosetNode) chooseBestMove(InfosetNode rootNode)
     {
-        //note that for the root node, all possible moves are compatible with any determinisation
-        //as it is the observing player's turn to go. Also the move that was used to last to go from the root
-        //to the best node would be the same as any other move to go between these nodes 
-        // int bestVisitCount = 0;
-        // Move bestMove = null;
-        // foreach (InfosetNode node in rootNode.Children)
-        // {
-        //     if (node.VisitCount > bestVisitCount)
-        //     {
-        //         bestVisitCount = node.VisitCount;
-        //         bestMove = node._currentMoveFromParent;
-        //     }   
-        // }
-
         double bestScore = 0;
         Move bestMove = null;
-        foreach (InfosetNode node in rootNode.Children)
+        InfosetNode bestNode = null;
+        //Note if we re-use a node, it may have children which are not in our list of filtered moves for this move.
+        //for example if our only possible first move left after filtering is war song, and this is played the next layer down
+        //might consist of say 4 children corresponding to play gold, way of the sword, end_turn and fortify.
+        //then if we filter our moves so that only fortify is available then only one of these children is available.
+        //Our current determinisation for the root (and root only) reflects our filtering and is a constant across all our
+        //determinisations (across all iterations), and hence we should choose from compatible children for our root node.
+        //As a final comment, if we are not re-using our node the chice between using children vs compatibleChildrenInTree
+        //can still have an impact, due to differing ordering of nodes and if two nodes have the same maxreward
+        //then one that comes first will be chosen.
+        //foreach (InfosetNode node in rootNode.Children) 
+        foreach (InfosetNode node in rootNode._compatibleChildrenInTree)
         {
             if (node.MaxReward >= bestScore) //note heuristic can take a value of zero
             {
                 bestScore = node.MaxReward;
                 bestMove = node.GetCurrentMoveFromParent();
+                bestNode = node;
             }   
         }
         
-        return bestMove;
+        return (bestMove, bestNode);
     }
     
     //taken from MCTSBot
@@ -629,6 +669,24 @@ public class InfosetNode
         _hashCode = calcHashCode(_refMoveHistory);
     }
 
+    //next three functions are used when preparing a node for re-use as a root node
+    public int GetRefMoveHistoryLength()
+    {
+        return _refMoveHistory.Count;
+    }
+    public void clearRefHistory()
+    {
+        _refMoveHistory = new List<Move>();
+    }
+    
+    public void removeMovesFromChildrenMoveHistory(int layer)
+    {
+        foreach (InfosetNode child in Children)
+        {
+            child._refMoveHistory.RemoveRange(0, layer);
+            child.removeMovesFromChildrenMoveHistory(layer);
+        }
+    }
     private ulong calcHashCode(List<Move> moveHistory)
     {
         unchecked // Allow arithmetic overflow, which is fine in this context
