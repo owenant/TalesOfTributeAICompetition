@@ -204,7 +204,7 @@ public class SOISMCTS : AI
         }
 
         moveTimer.Stop();
-        _totalTimeForGame += moveTimer.Elapsed();
+        _totalTimeForGame += moveTimer.Elapsed;
         _moveCounter += 1;
         return chosenMove;
     }
@@ -727,7 +727,7 @@ public class InfosetNode
     //and list of moves for which there are no children
     //TODO: need to figure out how to optimise this, it is very inefficient with three nested loops!
     //but lets get this working first.....
-    public (List<InfosetNode>, List<Move>) calcChildrenInTreeAndMovesNotInTreeOld()
+    public (List<InfosetNode>, List<Move>) calcChildrenInTreeAndMovesNotInTree()
     {
         //dont add children of an end turn node into the tree as we are then analyzing enemy player nodes also.
         if (_endTurn)
