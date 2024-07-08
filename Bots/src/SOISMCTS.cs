@@ -43,8 +43,11 @@ public class SOISMCTS : AI
     //parameters for MCTS
     private readonly double K = Math.Sqrt(2); 
     
-    //Taken form BestMCTS3 - as we reuse the same heuristic
+    //Taken from BestMCTS3 - as we reuse the same heuristic
     private GameStrategy _strategy = new(10, GamePhase.EarlyGame);
+    
+    //Timer for each game
+    private TimeSpan _totalTimeForGame;
     
     private void PrepareForGame()
     { 
@@ -52,8 +55,8 @@ public class SOISMCTS : AI
         
         //seed random number generator
         long seed = DateTime.Now.Ticks;
-        //rng = new(123);  
-        rng = new((ulong)seed); 
+        rng = new(123);  
+        //rng = new((ulong)seed); 
         
         //create logger object
         log = new Logger();
@@ -73,6 +76,9 @@ public class SOISMCTS : AI
         
         //increment game counter
         _gameCounter += 1;
+        
+        //initialise timer for this game
+        _totalTimeForGame = TimeSpan.FromSeconds(0);
     }
 
     public SOISMCTS()
@@ -87,6 +93,9 @@ public class SOISMCTS : AI
 
     public override Move Play(GameState gameState, List<Move> possibleMoves, TimeSpan remainingTime)
     {
+        //timer for this move
+        Stopwatch moveTimer = new Stopwatch();
+        
         if (_startOfTurn)
         {
             _startOfTurn = false;
@@ -136,11 +145,11 @@ public class SOISMCTS : AI
                 
                 //enter selection routine - return an array of nodes with index zero corresponding to root and final
                 //entry corresponding to the node selected for expansion
-                List<InfosetNode> pathThroughTree = select(root);
+                var(pathThroughTree, cvd, uvd) = select(root);
 
                 //if selected node has moves leading to nodes not in the tree then expand the tree
                 InfosetNode selectedNode = pathThroughTree[pathThroughTree.Count -1];
-                List<Move> uvd = selectedNode.GetMovesWithNoChildren();
+                //List<Move> uvd = selectedNode.GetMovesWithNoChildren();
                 InfosetNode expandedNode = selectedNode;
                 
                 //dont expand an end_turn node
@@ -148,7 +157,11 @@ public class SOISMCTS : AI
                 {
                     if (uvd.Count != 0)
                     {
-                        expandedNode = Expand(selectedNode, pathThroughTree);
+                        expandedNode = Expand(selectedNode, uvd, pathThroughTree);
+                    }
+                    else
+                    {
+                        //this should never happen unless we are in a game end state
                     }
                 }
 
@@ -190,19 +203,20 @@ public class SOISMCTS : AI
             _usedTimeInTurn = TimeSpan.FromSeconds(0);
         }
 
+        moveTimer.Stop();
+        _totalTimeForGame += moveTimer.Elapsed();
         _moveCounter += 1;
         return chosenMove;
     }
     
-    //returns the selected path through the tree
-    public List<InfosetNode> select(InfosetNode startNode)
+    //returns the selected path through the tree, and also the children in tree and move not in tree for the final selected node
+    public (List<InfosetNode>, List<InfosetNode>, List<Move>) select(InfosetNode startNode)
     { 
         //descend our infoset tree (restricted to nodes/actions compatible with the current determinisation of our start node)
         //Each successive node is chosen based on the UCB score, until a node is reached such that all moves from that node are not in the tree
         //or that node is terminal
         InfosetNode bestNode = startNode;
-        List<InfosetNode> cvd = startNode.GetCompatibleChildrenInTree();
-        List<Move> uvd = startNode.GetMovesWithNoChildren();
+        var (cvd, uvd) = startNode.calcChildrenInTreeAndMovesNotInTree();
         //this contains each node passed through in this iteration 
         List<InfosetNode> pathThroughTree = new List<InfosetNode>();
         pathThroughTree.Add(startNode);
@@ -218,8 +232,8 @@ public class SOISMCTS : AI
                     bestNode = node;
                 }
             }
-            cvd = bestNode.GetCompatibleChildrenInTree();
-            uvd = bestNode.GetMovesWithNoChildren();
+
+            (cvd, uvd) = bestNode.calcChildrenInTreeAndMovesNotInTree();
             pathThroughTree.Add(bestNode);
 
             //dont continue to select past an end_turn node
@@ -228,24 +242,30 @@ public class SOISMCTS : AI
                 break;
             }
         }
-        return pathThroughTree;
+        return (pathThroughTree, cvd, uvd);
     }
     
-    private InfosetNode Expand(InfosetNode selectedNode, List<InfosetNode> pathThroughTree)
+    private InfosetNode Expand(InfosetNode selectedNode, List<Move> selectedUVD, List<InfosetNode> pathThroughTree)
     {
         //choose a move at random from our list of moves that do not have nodes in the tree
         //and add child node to tree
-        List<Move> uvd = selectedNode.GetMovesWithNoChildren();
+        //List<Move> uvd = selectedNode.GetMovesWithNoChildren();
         Move? move = null;
         InfosetNode? newNode = null;
-        if (uvd.Count >= 1)
+        if (selectedUVD.Count >= 1)
         {
-            move = uvd.PickRandom(rng);
+            move = selectedUVD.PickRandom(rng);
             var (newSeededGameState, newMoves) = selectedNode.GetCurrentDeterminisation().GetState().ApplyMove(move);
             List<Move> newFilteredMoves = FilterMoves(newMoves, newSeededGameState); //TODO:Should we be filtering here?
             Determinisation newd = new Determinisation(newSeededGameState, newFilteredMoves);
             newNode = selectedNode.CreateChild(move, newd);
             pathThroughTree.Add(newNode);
+            
+            //next we add this new node to the parent's list of compatible children for this iteration, and also 
+            //remove the move that generated this node from the list of moves that dont have a child in the tree. 
+            //This means we dont need to call calcChildrenInTreeAndMovesNotInTree during the back propagation function
+            selectedNode._compatibleChildrenInTree.Add(newNode);
+            selectedNode._currentMovesWithNoChildren.Remove(move);
         }
         else
         {
@@ -305,16 +325,24 @@ public class SOISMCTS : AI
         //need to traverse tree from the playout start node back up to the root of the tree
         //note that our path through the tree should hold references to tree nodes and hence can be updated directly
         //(program design could be improved here!)
-        foreach (InfosetNode node in pathThroughTree)
+        for(int i = 0; i < pathThroughTree.Count; i++)
         {
+            InfosetNode node = pathThroughTree[i];
             node.VisitCount += 1;
             node.TotalReward += finalPayout;
             node.MaxReward = Math.Max(finalPayout, node.MaxReward);
             node.AvailabilityCount += 1;
-            List<InfosetNode> cvd = node.GetCompatibleChildrenInTree();
-            foreach (InfosetNode child in cvd)
+            //by definition the final node in the path through the tree wont have any compatible children in the tree
+            //to see this there are two case, 1. where selected node has uvd.count =0 (and the epxanded node is the same as the selected node
+            //, in which case we should be in an end game state and there are no further children to include in the tree
+            //or 2. uvd.count is not zero for the sected node, and the expanded node has just been added into the tree in which case
+            //again we have no compatible children in the tree
+            if (i < (pathThroughTree.Count - 1))
             {
-                child.AvailabilityCount += 1;
+                foreach (InfosetNode child in node._compatibleChildrenInTree)
+                {
+                    child.AvailabilityCount += 1;
+                }
             }
         }
     }
@@ -514,6 +542,10 @@ public class SOISMCTS : AI
         log.Log(finalBoardState.CurrentPlayer.PlayerID, message);
         message = "Game end reason: " + state.Reason.ToString();
         log.Log(finalBoardState.CurrentPlayer.PlayerID, message);
+        int minutes = _totalTimeForGame.Minutes;
+        int seconds = _totalTimeForGame.Seconds;
+        message = "Time taken by SOISMCTS bot for this game: " + $"Elapsed time: {minutes} minutes and {seconds} seconds.";
+        log.Log(finalBoardState.CurrentPlayer.PlayerID, message);
         message = "total number of sims across all games: " + _totalSimsCounter.ToString();
         log.Log(finalBoardState.CurrentPlayer.PlayerID, message);
         
@@ -543,8 +575,8 @@ public class InfosetNode
     private Determinisation? _currentDeterminisation; //to store determinisation that is currently being used in MCTS
     private List<Move>? _currentMoveHistory; //stores the history of moves from the root to this node, based on the current determinisation (this also
     //includes the current move from parent as the final entry in the list)
-    private List<Move>? _currentMovesWithNoChildren; //stores moves from node using current determinisation that have no children
-    private List<InfosetNode>? _compatibleChildrenInTree; //list of children of this node compatible with moves using current determinisation 
+    public List<Move>? _currentMovesWithNoChildren; //stores moves from node using current determinisation that have no children
+    public List<InfosetNode>? _compatibleChildrenInTree; //list of children of this node compatible with moves using current determinisation 
     
     //to label nodes which have been arrived at through an END_TURN command
     public bool _endTurn;
@@ -635,44 +667,74 @@ public class InfosetNode
         double ucbVal = TotalReward / (VisitCount * 1.0) + K * Math.Sqrt(Math.Log(AvailabilityCount) / (VisitCount * 1.0));
         return ucbVal;
     }
-
-    public List<Move> GetMovesWithNoChildren()
-    {
-        // if (_currentMovesWithNoChildren is null)
-        // {
-        //     calcChildrenInTreeAndMovesNotInTree();
-        // }
-   
-        calcChildrenInTreeAndMovesNotInTree();
-        
-        return _currentMovesWithNoChildren;
-        
-    }
-
-    public List<InfosetNode> GetCompatibleChildrenInTree()
-    {
-        // if (_compatibleChildrenInTree is null)
-        // {
-        //     calcChildrenInTreeAndMovesNotInTree();
-        // }
-        
-        calcChildrenInTreeAndMovesNotInTree();
-   
-        return _compatibleChildrenInTree;
-    }
+    
+    // //For current determinisation calculates compatible children in the tree
+    // //and list of moves for which there are no children
+    // public (List<InfosetNode>, List<Move>) calcChildrenInTreeAndMovesNotInTree()
+    // {
+    //     // Don't add children of an end turn node into the tree as we are then analyzing enemy player nodes also.
+    //     if (_endTurn)
+    //     {
+    //         _compatibleChildrenInTree = new List<InfosetNode>(); // never include children from an end turn in our tree
+    //         _currentMovesWithNoChildren = null; // doesn't have any meaning when we are at end an end turn
+    //         return (_compatibleChildrenInTree, _currentMovesWithNoChildren);
+    //     }
+    //     
+    //     _compatibleChildrenInTree = new List<InfosetNode>();
+    //     _currentMovesWithNoChildren = new List<Move>();
+    //
+    //     // Use a HashSet to quickly check if a child is already in _compatibleChildrenInTree
+    //     var compatibleChildrenSet = new HashSet<InfosetNode>(_compatibleChildrenInTree);
+    //
+    //     foreach (Move move in _currentDeterminisation.GetMoves())
+    //     {
+    //         // Create new state
+    //         var (newState, newMoves) = _currentDeterminisation.GetState().ApplyMove(move);
+    //
+    //         // Create move history to newState
+    //         var moveHistoryToState = new List<Move>(_currentMoveHistory) { move };
+    //         
+    //         // Find if new state or move history is in tree or not
+    //         bool foundInChildren = false;
+    //
+    //         foreach (InfosetNode child in Children)
+    //         {
+    //             if (child.CheckEquivalence(newState, moveHistoryToState))
+    //             {
+    //                 // Found child node that represents an information set containing equivalent states
+    //                 foundInChildren = true;
+    //                 child.SetCurrentDeterminisationAndMoveHistory(new Determinisation(newState, newMoves), moveHistoryToState);
+    //                 
+    //                 if (!compatibleChildrenSet.Contains(child))
+    //                 {
+    //                     _compatibleChildrenInTree.Add(child);
+    //                     compatibleChildrenSet.Add(child);
+    //                 }
+    //                 break; // No need to check other children if we found a match
+    //             }
+    //         }
+    //
+    //         if (!foundInChildren)
+    //         {
+    //             _currentMovesWithNoChildren.Add(move);
+    //         }
+    //     }
+    //     
+    //     return (_compatibleChildrenInTree, _currentMovesWithNoChildren);
+    // }
     
     //For current determinisation calculates compatible children in the tree
     //and list of moves for which there are no children
     //TODO: need to figure out how to optimise this, it is very inefficient with three nested loops!
     //but lets get this working first.....
-    private void calcChildrenInTreeAndMovesNotInTree()
+    public (List<InfosetNode>, List<Move>) calcChildrenInTreeAndMovesNotInTreeOld()
     {
         //dont add children of an end turn node into the tree as we are then analyzing enemy player nodes also.
         if (_endTurn)
         {
             _compatibleChildrenInTree = new List<InfosetNode>(); //never include children from an end_turn in our tree
             _currentMovesWithNoChildren = null; //doesnt have any meaning when we are at end an end turn
-            return;
+            return (_compatibleChildrenInTree, _currentMovesWithNoChildren);
         }
         
         _compatibleChildrenInTree = new List<InfosetNode>();
@@ -709,19 +771,21 @@ public class InfosetNode
                             break;
                         }
                     }
-
+    
                     if (!foundInCompatibleChildren)
                     {
                         _compatibleChildrenInTree.Add(child);
                     }
                 }
             }
-
+    
             if (!foundInChildren)
             {
                 _currentMovesWithNoChildren.Add(move);
             }
         }
+        
+        return (_compatibleChildrenInTree, _currentMovesWithNoChildren);
     }
     
     public InfosetNode CreateChild(Move? parentMove, Determinisation newd)
