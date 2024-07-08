@@ -50,8 +50,8 @@ public class SOISMCTS : AI
     private TimeSpan _totalTimeForGame;
     
     //parameters for re-using tree between moves
-    private bool _treeReuse = true;
-    private bool _randomDeterminisations = true;
+    private bool _treeReuse = false;
+    private bool _randomDeterminisations = false;
     private InfosetNode? _reusedRootNode;
     
     private void PrepareForGame()
