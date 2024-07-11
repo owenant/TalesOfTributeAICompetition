@@ -7,6 +7,10 @@ using ScriptsOfTribute.Board.Cards;
 using ScriptsOfTribute.Board.CardAction;
 using ScriptsOfTribute.utils;
 
+using System;
+using System.Collections.Generic;
+using System.Text;
+
 namespace Bots;
 
 //class to implement single observer information set monte carlo tree search. This implementation only 
@@ -14,13 +18,15 @@ namespace Bots;
 public class SOISMCTS : AI
 {
     //parameters for computational budget
-    private TimeSpan _usedTimeInTurn = TimeSpan.FromSeconds(0);
-    private TimeSpan _timeForMoveComputation = TimeSpan.FromSeconds(0.3);
-    private readonly TimeSpan _turnTimeout = TimeSpan.FromSeconds(9.9);
+    private TimeSpan _usedTimeInTurn = TimeSpan.FromSeconds(0); //tracks how long we are spending on current turn
+    private TimeSpan _timeForMoveComputation; //time limit for current move
+    private readonly TimeSpan _turnTimeout = TimeSpan.FromSeconds(9.9); //total time limit for turn
+    private TimeSpan _totalTimeForGame; //time taken for this game
     
     //logger and random seed
-    private SeededRandom rng; 
-    private Logger log;
+    private SeededRandom _intRng; //this is used for random integers
+    private Random _doubleRng;// this is used for random doubles
+    private Logger _log;
     
     //boolean to track start of turn 
     private bool _startOfTurn = true;
@@ -32,6 +38,7 @@ public class SOISMCTS : AI
     
     //variables ot track stats for a single move
     private static int _depthCounter ; //total final tree depth prior to choosing move
+    private static int _widthAndDepthCalcCount; //used tp normalise values in _widthTreeLayers and to normalise _depthCounter
     private static List<int> _widthTreeLayers; //number of nodes in each layer of tree when choosing move (which are assuming we
     //dont go more than five levels deep)
     private static int _moveTimeOutCounter; //number of times we time out a move across a game
@@ -46,13 +53,41 @@ public class SOISMCTS : AI
     //Taken from BestMCTS3 - as we reuse the same heuristic
     private GameStrategy _strategy = new(10, GamePhase.EarlyGame);
     
-    //Timer for each game
-    private TimeSpan _totalTimeForGame;
-    
     //parameters for re-using tree between moves
     private bool _treeReuse = false;
     private bool _randomDeterminisations = false;
     private InfosetNode? _reusedRootNode;
+    
+    //data structure for MAST statistics
+    private bool _useMAST = false;
+    private double _temperature = 1.0; //parameter for gibbs distribution
+    private double _thresholdForRandomMoves = 0.1; //parameter to choose a random move instead of move from Gibbs distribution
+    private Dictionary<MASTMoveKey, (double totalReward, int count)> mastStats;
+    
+    //boolean to turn move filtering on and off
+    private bool _filterMoves = true;
+    
+    //turn on time allocation by move
+    private bool _timeAllocation = true;
+    //we use the expected number of  moves by turn to allocation computational budget
+    //this is calibrated by running 100 games against MCTSBot3 and calculating average number of moves per turn
+    // private Dictionary<int, double> _expNoMovesPerTurn = new Dictionary<int, double>
+    // {
+    //     {0, 8.02}, {1, 7.91}, {2, 8.82}, {3, 8.2}, {4, 9}, {5, 9.56}, {6, 9.7}, {7, 9.34}, {8, 9.78}, 
+    //     {9, 9.79}, {10, 8.73}, {11, 8.31}, {12, 6.17}, {13, 5.5}, {14, 4}, {15, 2.91}, {16, 2.17}, {17, 1.48}, 
+    //     {18, 1.06}, {19, 0.66}, {20, 0.36}, {21, 0.32}, {22, 0.2 }, {23, 0.17}, {24, 0.08}
+    // };
+    // //round up expected number of moves per turn to help avoid timeouts
+    private Dictionary<int, double> _expNoMovesPerTurn = new Dictionary<int, double>
+    {
+        {0, 8}, {1, 8}, {2, 9}, {3, 9}, {4, 9}, {5, 10}, {6, 10}, {7, 10}, {8, 10}, 
+        {9, 10}, {10, 9}, {11, 9}, {12, 7}, {13, 6}, {14, 4}, {15, 3}, {16, 3}, {17, 2}, 
+        {18, 1}, {19, 1}, {20, 1}, {21, 1}, {22, 1}, {23, 1}, {24, 1}
+    };
+    
+    //the above is computed from the following which are outputted to the log file
+    private Dictionary<int, int> _rollingCountOfMovesInEachTurnAcrossGames = new Dictionary<int, int>();
+    private int _noMovesThisTurn; //used in time allocation
     
     private void PrepareForGame()
     { 
@@ -60,13 +95,14 @@ public class SOISMCTS : AI
         
         //seed random number generator
         long seed = DateTime.Now.Ticks;
-        //rng = new(123);  
-        rng = new((ulong)seed); 
+        //long seed = 123;
+        _intRng = new((ulong)seed); 
+        _doubleRng = new Random((int) seed); 
         
         //create logger object
-        log = new Logger();
-        log.P1LoggerEnabled = true;
-        log.P2LoggerEnabled = true;
+        _log = new Logger();
+        _log.P1LoggerEnabled = true;
+        _log.P2LoggerEnabled = true;
         
         //initialise start of turn and game bools
         _startOfTurn = true;
@@ -76,7 +112,8 @@ public class SOISMCTS : AI
         _moveCounter = 0;
         _simsCounter = 0;
         _depthCounter = 0;
-        _widthTreeLayers = Enumerable.Repeat(0, 15).ToList(); 
+        _widthTreeLayers = Enumerable.Repeat(0, 15).ToList();
+        _widthAndDepthCalcCount = 0;
         _moveTimeOutCounter = 0;
         
         //increment game counter
@@ -87,6 +124,12 @@ public class SOISMCTS : AI
         
         //at start of game reused tree node is set to null
         _reusedRootNode = null;
+        
+        //initialise time for move computation to a fixed time if we are not allocating time by turn
+        if (!_timeAllocation)
+        {
+            _timeForMoveComputation = TimeSpan.FromSeconds(0.55);
+        }
     }
 
     public SOISMCTS()
@@ -96,7 +139,7 @@ public class SOISMCTS : AI
     
     public override PatronId SelectPatron(List<PatronId> availablePatrons, int round)
     {
-        return availablePatrons.PickRandom(rng);
+        return availablePatrons.PickRandom(_intRng);
     }
 
     public override Move Play(GameState gameState, List<Move> possibleMoves, TimeSpan remainingTime)
@@ -109,25 +152,36 @@ public class SOISMCTS : AI
         {
             _usedTimeInTurn = TimeSpan.FromSeconds(0);
             SelectStrategy(gameState);
+            
+            //we maintain MAST stats across moves within a turn
+            mastStats = new Dictionary<MASTMoveKey, (double totalReward, int count)>();
+            
+            //initialise move counter for this turn
+            _noMovesThisTurn = 0;
         }
         
         //if only possible move is end turn then just end the turn
         if (possibleMoves.Count == 1 && possibleMoves[0].Command == CommandEnum.END_TURN)
         {
             _startOfTurn = true;
-            _usedTimeInTurn = TimeSpan.FromSeconds(0);
-            _turnCounter += 1;
+            //_usedTimeInTurn = TimeSpan.FromSeconds(0);
             _moveCounter += 1;
-            _widthTreeLayers[0] += 1;
+            //_widthTreeLayers[0] += 1;
+            //_widthCalcCount += 1;
+            _rollingCountOfMovesInEachTurnAcrossGames[_turnCounter] 
+                = _rollingCountOfMovesInEachTurnAcrossGames.TryGetValue(_turnCounter, out int count1) ? count1 + 1 : 1;
+            _turnCounter += 1;
+            _noMovesThisTurn = 0;
+            //_usedTimeInTurn += moveTimer.Elapsed;
             return possibleMoves[0];
         }
         
         //Initialise a root node
-        SeededGameState s = gameState.ToSeededGameState((ulong) rng.Next());
+        SeededGameState s = gameState.ToSeededGameState((ulong) _intRng.Next());
         List<Move> filteredMoves = FilterMoves(possibleMoves, s);
         Determinisation d = new Determinisation(s, filteredMoves);
         InfosetNode? root = null;
-        if (_treeReuse && !_startOfTurn)
+        if (_treeReuse && !_startOfTurn && _reusedRootNode != null)
         {
             root = _reusedRootNode;
             root.SetCurrentDeterminisationAndMoveHistory(d, null);   
@@ -136,14 +190,46 @@ public class SOISMCTS : AI
         {
             root = new InfosetNode(null, null, d);
         }
+        _reusedRootNode = null;
         _startOfTurn = false;
+        
+        //check to see if we only have one move available after filtering moves and if so just return that
+        if (filteredMoves.Count == 1)
+        {
+            if (_treeReuse)
+            {
+                //TODO::do we need to do anything here? Can we get here with a previous node that is null?
+                //since we expect as soon as we get a choice all future moves will have a choice, until they dont
+                //but shoudlnt have the situation where we have one filtered moves repeatedly, then a choice, then
+                //only one filtered move afterwards......
+            }
+            _moveCounter += 1;
+            //_timeBuffer += _timeForMoveComputation;
+            _rollingCountOfMovesInEachTurnAcrossGames[_turnCounter] 
+                = _rollingCountOfMovesInEachTurnAcrossGames.TryGetValue(_turnCounter, out int count2) ? count2 + 1 : 1;
+            _noMovesThisTurn += 1;
+            _usedTimeInTurn += moveTimer.Elapsed;
+            return filteredMoves[0];
+        }
+        
+        if (_timeAllocation)
+        {
+            //in this case we allocate time for this move based on remaining time budget available
+            TimeSpan remainingTimeForTurn = (_turnTimeout - _usedTimeInTurn);
+            double expNoMovesForThisTurn =
+                _expNoMovesPerTurn.TryGetValue(_turnCounter, out double noMoves) ? noMoves : 1;
+            double expectedNoOfRemainingMoves = Math.Max(expNoMovesForThisTurn - _noMovesThisTurn, 1);
+            _timeForMoveComputation = 0.9999* remainingTimeForTurn / (1.0 * (expectedNoOfRemainingMoves));
+        }
         
         Move chosenMove = null;
         InfosetNode nextNode = null;
         if (_usedTimeInTurn + _timeForMoveComputation >= _turnTimeout)
         {
             _moveTimeOutCounter += 1;
-            chosenMove = possibleMoves.PickRandom(rng);
+            //if we run out of time for this move, don't choose end turn
+            chosenMove = NotEndTurnPossibleMoves(filteredMoves).PickRandom(_intRng);
+            //chosenMove = possibleMoves.PickRandom(_intRng);
         }
         else
         {
@@ -158,7 +244,7 @@ public class SOISMCTS : AI
                 //updating the stats for each tree node
                 if (_randomDeterminisations)
                 {
-                    s = gameState.ToSeededGameState((ulong) rng.Next());
+                    s = gameState.ToSeededGameState((ulong) _intRng.Next());
                     filteredMoves = FilterMoves(possibleMoves, s);
                     d = new Determinisation(s, filteredMoves); 
                     //and set as determinisation to use for this iteration
@@ -188,7 +274,7 @@ public class SOISMCTS : AI
                 }
 
                 //next we simulate our playouts from our expanded node 
-                double payoutFromExpandedNode = Simulate(expandedNode);
+                double payoutFromExpandedNode = Rollout(expandedNode);
 
                 //next we complete the backpropagation step
                 BackPropagation(payoutFromExpandedNode, pathThroughTree);
@@ -198,7 +284,7 @@ public class SOISMCTS : AI
 
                 maxDepthForThisMove = Math.Max(maxDepthForThisMove, pathThroughTree.Count);
             }
-            _usedTimeInTurn += _timeForMoveComputation;
+            //_usedTimeInTurn += _timeForMoveComputation;
             
             //increase depth counter
             _depthCounter += maxDepthForThisMove;
@@ -213,10 +299,23 @@ public class SOISMCTS : AI
                 }
                 _widthTreeLayers[i] += treeWidthForEachLayerForThisMove[i];
             }
+            //increase width calculator counter used to normalise previous counts
+            _widthAndDepthCalcCount += 1;
 
             //finally we return the move from the root node that corresponds ot the best move
             (chosenMove, nextNode) = chooseBestMove(root);
         }
+        
+        _rollingCountOfMovesInEachTurnAcrossGames[_turnCounter] 
+            = _rollingCountOfMovesInEachTurnAcrossGames.TryGetValue(_turnCounter, out int count3) ? count3 + 1 : 1;
+        
+        //set-up root node for next move
+        if (_treeReuse)
+        {
+            _reusedRootNode = prepareRootNodeForNextIteration(chosenMove, nextNode);
+        }
+        _usedTimeInTurn += moveTimer.Elapsed;
+        _noMovesThisTurn += 1;
         
         if (chosenMove.Command == CommandEnum.END_TURN)
         {
@@ -229,12 +328,6 @@ public class SOISMCTS : AI
         _totalTimeForGame += moveTimer.Elapsed;
         _moveCounter += 1;
         
-        //set-up root node for next move
-        if (_treeReuse)
-        {
-            _reusedRootNode = prepareRootNodeForNextIteration(chosenMove, nextNode);
-        }
-        
         return chosenMove;
     }
 
@@ -243,12 +336,12 @@ public class SOISMCTS : AI
         //to prepare a node for re-use in the next iteration we need to do the following things
         //1. Set it's parent to null
         //2. Remove the move used ot reach this node from it's move history and all it's children's move histories.
-        //Note current determinisations can be ignored as tehyw ill be reset in the next iteration
+        //Note current determinisations can be ignored as they will be reset in the next iteration
         node.Parent = null; //clear parent
         int layer = node.GetRefMoveHistoryLength();
         node.clearRefHistory();
         node.removeMovesFromChildrenMoveHistory(layer); //clear reference move history as this node has now become the root.
-
+        
         return node;
     }
     
@@ -265,7 +358,7 @@ public class SOISMCTS : AI
         pathThroughTree.Add(startNode);
         while (bestNode.GetCurrentDeterminisation().GetState().GameEndState == null && uvd.Count == 0)
         {
-            double bestVal = 0;
+            double bestVal = double.NegativeInfinity;
             foreach(InfosetNode node in cvd)
             {
                 double val = node.UCB(K);
@@ -297,7 +390,15 @@ public class SOISMCTS : AI
         InfosetNode? newNode = null;
         if (selectedUVD.Count >= 1)
         {
-            move = selectedUVD.PickRandom(rng);
+            if (_useMAST)
+            {
+                //bias tree expansion using Gibbs distribution and MAST stats
+                move = selectNextMoveUsingMAST(selectedUVD);
+            }
+            else
+            {
+                move = selectedUVD.PickRandom(_intRng);
+            }
             var (newSeededGameState, newMoves) = selectedNode.GetCurrentDeterminisation().GetState().ApplyMove(move);
             List<Move> newFilteredMoves = FilterMoves(newMoves, newSeededGameState); //TODO:Should we be filtering here?
             Determinisation newd = new Determinisation(newSeededGameState, newFilteredMoves);
@@ -322,7 +423,7 @@ public class SOISMCTS : AI
 
     //simulate our game from a given determinisation associated with our expanded node (ignoring information sets)
     //adapted from last years winner
-    public double Simulate(InfosetNode startNode)
+    public double Rollout(InfosetNode startNode)
     {
         //if the move from the parent is END_TURN, we need to just take the heuristic value for the parent (end turn
         //doesnt change the value of player's position, and we cant apply the heuristic when the current player is the enemy 
@@ -331,6 +432,9 @@ public class SOISMCTS : AI
         {
             return _strategy.Heuristic(startNode.Parent.GetCurrentDeterminisation().GetState());
         }
+        
+        //used to update MAST stats
+        List<Move> visitedMoves = new List<Move>();
         
         SeededGameState gameState = startNode.GetCurrentDeterminisation().GetState();
         //check that only move from startNode isn't an end turn
@@ -341,7 +445,17 @@ public class SOISMCTS : AI
         {
             return _strategy.Heuristic(gameState);
         }
-        Move move = notEndMoves.PickRandom(rng);
+
+        Move move = null;
+        if (_useMAST)
+        {
+            move = selectNextMoveUsingMAST(notEndMoves);
+            visitedMoves.Add(move);
+        }
+        else
+        {
+            move = notEndMoves.PickRandom(_intRng);
+        }
     
         while (move.Command != CommandEnum.END_TURN)
         {
@@ -350,18 +464,103 @@ public class SOISMCTS : AI
     
             if (notEndMoves.Count > 0)
             {
-                move = notEndMoves.PickRandom(rng);
+                if (_useMAST)
+                {
+                    move = selectNextMoveUsingMAST(notEndMoves);
+                    visitedMoves.Add(move);
+                }
+                else
+                {
+                    move = notEndMoves.PickRandom(_intRng);
+                }
             }
             else
             {
                 move = Move.EndTurn();
             }
-            
         }
         
-        return _strategy.Heuristic(gameState);
+        double payoff = _strategy.Heuristic(gameState);
+
+        if (_useMAST)
+        {
+            foreach (Move mv in visitedMoves)
+            {
+                MASTMoveKey key = new MASTMoveKey(mv);
+                if (!mastStats.ContainsKey(key))
+                {
+                    mastStats[key] = (0, 0);
+                }
+                var (totalReward, count) = mastStats[key];
+                mastStats[key] = (totalReward + payoff, count + 1);
+            }
+        }
+        
+        return payoff;
     }
-    
+
+    private Move selectNextMoveUsingMAST(List<Move> moveList)
+    {
+        if (moveList.Count == 1)
+        {
+            return moveList[0];
+        }
+        else if (_doubleRng.NextDouble() < _thresholdForRandomMoves)
+        {
+            return moveList.PickRandom(_intRng);
+        }
+        else
+        {
+            List<double> moveProbabilities = Enumerable.Repeat(0.0, moveList.Count()).ToList();
+            List<MASTMoveKey> moveKeys = new List<MASTMoveKey>();
+            double totalSum = 0.0;
+
+            //note, need ot be careful here as we may have multiple moves of the same type (e.g. play gold which will only
+            //have one entry in mastStats, and also will have duplicate MASTMoveKeys
+            for(int i = 0; i < moveList.Count; i++)
+            {
+                moveKeys.Add(new MASTMoveKey(moveList[i]));
+                double averageReward =
+                    mastStats.TryGetValue(moveKeys[i], out var stats) ? stats.totalReward / stats.count : 0.0;
+                double probability = Math.Exp(averageReward / _temperature);
+                moveProbabilities[i] = probability;
+                totalSum += probability;
+            }
+
+            // Ensure we have non-zero totalSum to avoid division by zero
+            if (totalSum < 0.00000000001)
+            {
+                // If totalSum is zero, all probabilities are zero; fall back to uniform distribution
+                for(int i = 0; i < moveProbabilities.Count; i++)
+                {
+                    moveProbabilities[i] = 1.0 / moveList.Count;
+                }
+            }
+            else
+            {
+                // Normalize the probabilities
+                for(int i = 0; i < moveProbabilities.Count; i++)
+                {
+                    moveProbabilities[i] /= totalSum;
+                }
+            }
+
+            double cumulativeProbability = 0.0;
+            double randomValue = _doubleRng.NextDouble();
+            for(int i = 0; i < moveList.Count; i++)
+            {
+                cumulativeProbability += moveProbabilities[i];
+                if (randomValue <= cumulativeProbability)
+                {
+                    return moveKeys[i].GetMove();
+                }
+            }
+        }
+
+        //this shouldn't happen
+        return null;
+    }
+
     //function to backpropagate simulation playout results
     private void BackPropagation(double finalPayout, List<InfosetNode> pathThroughTree)
     {
@@ -393,7 +592,7 @@ public class SOISMCTS : AI
     //chooses child from root node with highest visitation number, returns that node and the move to get to that node
     public (Move, InfosetNode) chooseBestMove(InfosetNode rootNode)
     {
-        double bestScore = 0;
+        double bestScore = double.NegativeInfinity;
         Move bestMove = null;
         InfosetNode bestNode = null;
         //Note if we re-use a node, it may have children which are not in our list of filtered moves for this move.
@@ -428,6 +627,9 @@ public class SOISMCTS : AI
      //taken from BestMCTS3
     private List<Move> FilterMoves(List<Move> moves, SeededGameState gameState)
     {
+        if (!_filterMoves)
+            return moves;
+        
         moves.Sort(new MoveComparer());
         if (moves.Count == 1) return moves;
         if (gameState.BoardState == BoardState.CHOICE_PENDING)
@@ -558,40 +760,68 @@ public class SOISMCTS : AI
     {
         double avgMovesPerTurn = _moveCounter/ (1.0 * _turnCounter);
         double avgSimsPerMove = _simsCounter / (1.0 * _moveCounter);
-        double avgDepthPerMove = _depthCounter/ (1.0 * _moveCounter);
+        double avgDepthPerMove = _depthCounter/ (1.0 * _widthAndDepthCalcCount);
         double avgMoveTimeOutsPerTurn = _moveTimeOutCounter/(1.0 * _turnCounter);
         
         string message = "Game count: " + _gameCounter.ToString();
-        log.Log(finalBoardState.CurrentPlayer.PlayerID, message);
+        _log.Log(finalBoardState.CurrentPlayer.PlayerID, message);
         message = "Turn Counter: " + _turnCounter.ToString();
-        log.Log(finalBoardState.CurrentPlayer.PlayerID, message);
+        _log.Log(finalBoardState.CurrentPlayer.PlayerID, message);
         message = "Average number of moves per turn: " + avgMovesPerTurn.ToString();
-        log.Log(finalBoardState.CurrentPlayer.PlayerID, message);
+        _log.Log(finalBoardState.CurrentPlayer.PlayerID, message);
         message = "Average number of move timeouts per turn: " + avgMoveTimeOutsPerTurn.ToString();
-        log.Log(finalBoardState.CurrentPlayer.PlayerID, message);
+        _log.Log(finalBoardState.CurrentPlayer.PlayerID, message);
         message = "Average number of simulations per move: " + avgSimsPerMove.ToString();
-        log.Log(finalBoardState.CurrentPlayer.PlayerID, message);
+        _log.Log(finalBoardState.CurrentPlayer.PlayerID, message);
         message = "Average tree depth searched per move: " + avgDepthPerMove.ToString();
-        log.Log(finalBoardState.CurrentPlayer.PlayerID, message);
+        _log.Log(finalBoardState.CurrentPlayer.PlayerID, message);
         message = "Average widths of each layer of the tree per move: ";
         for (int i = 0; i < _widthTreeLayers.Count; i++)
         {
-            message += (_widthTreeLayers[i]/ (1.0 * _moveCounter)).ToString() + ",";
+            message += (_widthTreeLayers[i]/ (1.0 * _widthAndDepthCalcCount)).ToString() + ",";
         }
-        log.Log(finalBoardState.CurrentPlayer.PlayerID, message);
+        _log.Log(finalBoardState.CurrentPlayer.PlayerID, message);
         message = "Winner: " + state.Winner.ToString();
-        log.Log(finalBoardState.CurrentPlayer.PlayerID, message);
+        _log.Log(finalBoardState.CurrentPlayer.PlayerID, message);
         message = "Game end reason: " + state.Reason.ToString();
-        log.Log(finalBoardState.CurrentPlayer.PlayerID, message);
+        _log.Log(finalBoardState.CurrentPlayer.PlayerID, message);
         int minutes = _totalTimeForGame.Minutes;
         int seconds = _totalTimeForGame.Seconds;
         message = "Time taken by SOISMCTS bot for this game: " + $"Elapsed time: {minutes} minutes and {seconds} seconds.";
-        log.Log(finalBoardState.CurrentPlayer.PlayerID, message);
+        _log.Log(finalBoardState.CurrentPlayer.PlayerID, message);
         message = "total number of sims across all games: " + _totalSimsCounter.ToString();
-        log.Log(finalBoardState.CurrentPlayer.PlayerID, message);
-        
+        _log.Log(finalBoardState.CurrentPlayer.PlayerID, message);
+        // message = "Rolling total of moves per turn across game: " + DictionaryToString<int,int>(_rollingCountOfMovesInEachTurnAcrossGames);
+        // _log.Log(finalBoardState.CurrentPlayer.PlayerID, message);
+        //
+        // //calculate expected number of moves per turn
+        // foreach (var entry in _rollingCountOfMovesInEachTurnAcrossGames)
+        // {
+        //     _expNoMovesPerTurn[entry.Key] = entry.Value/(1.0*_gameCounter);
+        // }
+        //
+        // message = "Expected number of moves per turn: " + DictionaryToString<int,double>(_expNoMovesPerTurn);
+        // _log.Log(finalBoardState.CurrentPlayer.PlayerID, message);
+        //
         //prepare for next game
         this.PrepareForGame();
+    }
+    
+    static string DictionaryToString<T1, T2>(Dictionary<T1, T2> dictionary)
+    {
+        StringBuilder sb = new StringBuilder();
+        sb.Append("{ ");
+        foreach (var entry in dictionary)
+        {
+            sb.AppendFormat("{0}: {1}, ", entry.Key, entry.Value);
+        }
+        // Remove the trailing comma and space, and add the closing brace
+        if (dictionary.Count > 0)
+        {
+            sb.Length -= 2; // Remove the last ", "
+        }
+        sb.Append(" }");
+        return sb.ToString();
     }
 }
 
@@ -902,6 +1132,40 @@ public class Determinisation
     public List<Move>? GetMoves()
     {
         return moves;
+    }
+}
+
+//used as key for dictionary used ot store MAST stats. Cant use an ordinary move object as the hashcode is based only on COMMAND
+//and hence move type
+public class MASTMoveKey
+{
+    private Move _mv;
+    private int _hashCode;
+    
+    public MASTMoveKey(Move mv)
+    {
+        _mv = mv;
+        _hashCode = (int) MoveComparer.HashMove(mv);
+    }
+    
+    public override bool Equals(object obj)
+    {
+        if (obj is not MASTMoveKey)
+        {
+            return false;
+        }
+
+        return this._hashCode == ((MASTMoveKey) obj).GetHashCode();
+    }
+
+    public override int GetHashCode()
+    {
+        return _hashCode;
+    }
+
+    public Move GetMove()
+    {
+        return _mv;
     }
 }
 
