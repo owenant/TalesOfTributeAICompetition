@@ -10,6 +10,8 @@ using ScriptsOfTribute.utils;
 using System;
 using System.Collections.Generic;
 using System.Text;
+using System.IO;
+using System.Reflection.Emit;
 
 namespace Bots;
 
@@ -27,6 +29,9 @@ public class SOISMCTS : AI
     private SeededRandom _intRng; //this is used for random integers
     private Random _doubleRng;// this is used for random doubles
     private Logger _log;
+    private bool _outputTreeStructureToLogFile = false;
+    string _logFilePath = "SOIMCTS_Tree_Log.txt";
+    //private StreamWriter _logWriter;
     
     //boolean to track start of turn 
     private bool _startOfTurn = true;
@@ -34,7 +39,8 @@ public class SOISMCTS : AI
     //counters to track stats for a single game
     private int _simsCounter; // total number of MCTS simulations for a single game 
     private int _turnCounter; // total number of turns for a single game
-    private int _moveCounter; // total number of moves for a single gam
+    private int _moveCounter; // total number of moves for a single game
+    private int _movesWithSimsCounter; //total number of moves for a single game which use MCTS simulation loop
     
     //variables ot track stats for a single move
     private static int _depthCounter ; //total final tree depth prior to choosing move
@@ -54,8 +60,9 @@ public class SOISMCTS : AI
     private GameStrategy _strategy = new(10, GamePhase.EarlyGame);
     
     //parameters for re-using tree between moves
-    private bool _treeReuse = false;
+    private bool _treeReuse = true;
     private bool _randomDeterminisations = false;
+    private int _noSimsPerRandomisation = 100;
     private InfosetNode? _reusedRootNode;
     
     //data structure for MAST statistics
@@ -65,10 +72,10 @@ public class SOISMCTS : AI
     private Dictionary<MASTMoveKey, (double totalReward, int count)> mastStats;
     
     //boolean to turn move filtering on and off
-    private bool _filterMoves = true;
+    private bool _filterMoves = false;
     
     //turn on time allocation by move
-    private bool _timeAllocation = true;
+    private bool _timeAllocation = false;
     //we use the expected number of  moves by turn to allocation computational budget
     //this is calibrated by running 100 games against MCTSBot3 and calculating average number of moves per turn
     // private Dictionary<int, double> _expNoMovesPerTurn = new Dictionary<int, double>
@@ -87,7 +94,9 @@ public class SOISMCTS : AI
     
     //the above is computed from the following which are outputted to the log file
     private Dictionary<int, int> _rollingCountOfMovesInEachTurnAcrossGames = new Dictionary<int, int>();
-    private int _noMovesThisTurn; //used in time allocation
+    //private int _noMovesThisTurn; //used in time allocation
+
+    private bool _useMCTSBotHeuristic = true;
     
     private void PrepareForGame()
     { 
@@ -110,6 +119,7 @@ public class SOISMCTS : AI
         //initialise counters
         _turnCounter = 0;
         _moveCounter = 0;
+        _movesWithSimsCounter = 0;
         _simsCounter = 0;
         _depthCounter = 0;
         _widthTreeLayers = Enumerable.Repeat(0, 15).ToList();
@@ -128,8 +138,12 @@ public class SOISMCTS : AI
         //initialise time for move computation to a fixed time if we are not allocating time by turn
         if (!_timeAllocation)
         {
-            _timeForMoveComputation = TimeSpan.FromSeconds(0.55);
+            //_timeForMoveComputation = TimeSpan.FromSeconds(0.55);
+            _timeForMoveComputation = TimeSpan.FromSeconds(0.3);
         }
+        
+        //stream writer for tree structure reporting
+        //_logWriter = new StreamWriter(_logFilePath, true);
     }
 
     public SOISMCTS()
@@ -145,8 +159,8 @@ public class SOISMCTS : AI
     public override Move Play(GameState gameState, List<Move> possibleMoves, TimeSpan remainingTime)
     {
         //timer for this move
-        Stopwatch moveTimer = new Stopwatch();
-        moveTimer.Start();
+        //Stopwatch moveTimer = new Stopwatch();
+        //moveTimer.Start();
         
         if (_startOfTurn)
         {
@@ -157,7 +171,17 @@ public class SOISMCTS : AI
             mastStats = new Dictionary<MASTMoveKey, (double totalReward, int count)>();
             
             //initialise move counter for this turn
-            _noMovesThisTurn = 0;
+            //_noMovesThisTurn = 0;
+            
+            if (_timeAllocation)
+            {
+                //in this case we allocate time for this move based on remaining time budget available
+                //TimeSpan remainingTimeForTurn = (_turnTimeout - _usedTimeInTurn);
+                double expNoMovesForThisTurn =
+                    _expNoMovesPerTurn.TryGetValue(_turnCounter, out double noMoves) ? noMoves : 1;
+                //double expectedNoOfRemainingMoves = Math.Max(expNoMovesForThisTurn - _noMovesThisTurn, 1);
+                _timeForMoveComputation = _turnTimeout / (1.0 * (expNoMovesForThisTurn));
+            }
         }
         
         //if only possible move is end turn then just end the turn
@@ -171,7 +195,7 @@ public class SOISMCTS : AI
             _rollingCountOfMovesInEachTurnAcrossGames[_turnCounter] 
                 = _rollingCountOfMovesInEachTurnAcrossGames.TryGetValue(_turnCounter, out int count1) ? count1 + 1 : 1;
             _turnCounter += 1;
-            _noMovesThisTurn = 0;
+            //_noMovesThisTurn = 0;ƒ
             //_usedTimeInTurn += moveTimer.Elapsed;
             return possibleMoves[0];
         }
@@ -190,7 +214,7 @@ public class SOISMCTS : AI
         {
             root = new InfosetNode(null, null, d);
         }
-        _reusedRootNode = null;
+        _reusedRootNode = null; //TODO: does this reset our reused node?
         _startOfTurn = false;
         
         //check to see if we only have one move available after filtering moves and if so just return that
@@ -207,20 +231,20 @@ public class SOISMCTS : AI
             //_timeBuffer += _timeForMoveComputation;
             _rollingCountOfMovesInEachTurnAcrossGames[_turnCounter] 
                 = _rollingCountOfMovesInEachTurnAcrossGames.TryGetValue(_turnCounter, out int count2) ? count2 + 1 : 1;
-            _noMovesThisTurn += 1;
-            _usedTimeInTurn += moveTimer.Elapsed;
+            //_noMovesThisTurn += 1;
+            //_usedTimeInTurn += moveTimer.Elapsed;
             return filteredMoves[0];
         }
         
-        if (_timeAllocation)
-        {
-            //in this case we allocate time for this move based on remaining time budget available
-            TimeSpan remainingTimeForTurn = (_turnTimeout - _usedTimeInTurn);
-            double expNoMovesForThisTurn =
-                _expNoMovesPerTurn.TryGetValue(_turnCounter, out double noMoves) ? noMoves : 1;
-            double expectedNoOfRemainingMoves = Math.Max(expNoMovesForThisTurn - _noMovesThisTurn, 1);
-            _timeForMoveComputation = 0.9999* remainingTimeForTurn / (1.0 * (expectedNoOfRemainingMoves));
-        }
+        // if (_timeAllocation)
+        // {
+        //     //in this case we allocate time for this move based on remaining time budget available
+        //     TimeSpan remainingTimeForTurn = (_turnTimeout - _usedTimeInTurn);
+        //     double expNoMovesForThisTurn =
+        //         _expNoMovesPerTurn.TryGetValue(_turnCounter, out double noMoves) ? noMoves : 1;
+        //     double expectedNoOfRemainingMoves = Math.Max(expNoMovesForThisTurn - _noMovesThisTurn, 1);
+        //     _timeForMoveComputation = 0.9999* remainingTimeForTurn / (1.0 * (expectedNoOfRemainingMoves));
+        // }
         
         Move chosenMove = null;
         InfosetNode nextNode = null;
@@ -234,21 +258,25 @@ public class SOISMCTS : AI
         else
         {
             int maxDepthForThisMove = 0;
-            Stopwatch timer = new Stopwatch();
+            Stopwatch timer = new Stopwatch(); //why does this not have an issue with multi-threading?
             timer.Start();
+            int noIterations = 0;
             while (timer.Elapsed < _timeForMoveComputation)
-            //int maxIterations = 2500;
+            //int maxIterations = 100;
             //for(int i = 0; i < maxIterations; i++)
             {
                 //in InfosetMCTS each iteration of the loop starts with a new determinisation, which we use to explore the same tree
                 //updating the stats for each tree node
                 if (_randomDeterminisations)
                 {
-                    s = gameState.ToSeededGameState((ulong) _intRng.Next());
-                    filteredMoves = FilterMoves(possibleMoves, s);
-                    d = new Determinisation(s, filteredMoves); 
-                    //and set as determinisation to use for this iteration
-                    root.SetCurrentDeterminisationAndMoveHistory(d, null); 
+                    if (noIterations % _noSimsPerRandomisation == 0)
+                    {
+                        s = gameState.ToSeededGameState((ulong)_intRng.Next());
+                        filteredMoves = FilterMoves(possibleMoves, s);
+                        d = new Determinisation(s, filteredMoves);
+                        //and set as determinisation to use for this iteration
+                        root.SetCurrentDeterminisationAndMoveHistory(d, null);
+                    }
                 }
                 
                 //enter selection routine - return an array of nodes with index zero corresponding to root and final
@@ -273,6 +301,14 @@ public class SOISMCTS : AI
                     }
                 }
 
+                // if (expandedNode.Parent.Parent == null)
+                // {
+                //     if (expandedNode.GetCurrentMoveFromParent().Command == CommandEnum.END_TURN)
+                //     {
+                //         int j = 0;
+                //     }
+                // }
+
                 //next we simulate our playouts from our expanded node 
                 double payoutFromExpandedNode = Rollout(expandedNode);
 
@@ -283,8 +319,22 @@ public class SOISMCTS : AI
                 _totalSimsCounter += 1;
 
                 maxDepthForThisMove = Math.Max(maxDepthForThisMove, pathThroughTree.Count);
+
+               if (_outputTreeStructureToLogFile && (noIterations % 10 == 0))
+               //if (_outputTreeStructureToLogFile && _turnCounter == 0)
+                {
+                    using (StreamWriter logWriter = new StreamWriter(_logFilePath, true))  // Append mode
+                    {
+                        logWriter.WriteLine("Iteration number:" + noIterations.ToString());
+                        logWriter.WriteLine("Turn number:" + _turnCounter.ToString());
+                        TreeReporter.ReportTreeStructure(root, K, logWriter);
+                        logWriter.WriteLine();
+                    }
+                }
+                
+                noIterations += 1;
             }
-            //_usedTimeInTurn += _timeForMoveComputation;
+            _usedTimeInTurn += _timeForMoveComputation;
             
             //increase depth counter
             _depthCounter += maxDepthForThisMove;
@@ -304,6 +354,8 @@ public class SOISMCTS : AI
 
             //finally we return the move from the root node that corresponds ot the best move
             (chosenMove, nextNode) = chooseBestMove(root);
+
+            _movesWithSimsCounter += 1;
         }
         
         _rollingCountOfMovesInEachTurnAcrossGames[_turnCounter] 
@@ -314,8 +366,8 @@ public class SOISMCTS : AI
         {
             _reusedRootNode = prepareRootNodeForNextIteration(chosenMove, nextNode);
         }
-        _usedTimeInTurn += moveTimer.Elapsed;
-        _noMovesThisTurn += 1;
+        //_usedTimeInTurn += moveTimer.Elapsed;
+        //_noMovesThisTurn += 1;
         
         if (chosenMove.Command == CommandEnum.END_TURN)
         {
@@ -324,8 +376,8 @@ public class SOISMCTS : AI
             _usedTimeInTurn = TimeSpan.FromSeconds(0);
         }
 
-        moveTimer.Stop();
-        _totalTimeForGame += moveTimer.Elapsed;
+        // moveTimer.Stop();
+        // _totalTimeForGame += moveTimer.Elapsed;
         _moveCounter += 1;
         
         return chosenMove;
@@ -430,7 +482,14 @@ public class SOISMCTS : AI
         //player)
         if (startNode._endTurn)
         {
-            return _strategy.Heuristic(startNode.Parent.GetCurrentDeterminisation().GetState());
+            if (_useMCTSBotHeuristic)
+            {
+                return HeuristicFromMCTSBot(startNode.Parent.GetCurrentDeterminisation().GetState());
+            }
+            else
+            {
+                return _strategy.Heuristic(startNode.Parent.GetCurrentDeterminisation().GetState());
+            }
         }
         
         //used to update MAST stats
@@ -443,7 +502,14 @@ public class SOISMCTS : AI
         List<Move> notEndMoves = possibleMoves.Where(m => m.Command != CommandEnum.END_TURN).ToList();
         if (notEndMoves.Count == 0)
         {
-            return _strategy.Heuristic(gameState);
+            if (_useMCTSBotHeuristic)
+            {
+                return HeuristicFromMCTSBot(gameState);
+            }
+            else
+            {
+                return _strategy.Heuristic(gameState);
+            }
         }
 
         Move move = null;
@@ -480,8 +546,16 @@ public class SOISMCTS : AI
             }
         }
         
-        double payoff = _strategy.Heuristic(gameState);
-
+        double payoff = 0;
+        if (_useMCTSBotHeuristic)
+        {
+            payoff = HeuristicFromMCTSBot(gameState);
+        }
+        else
+        {
+            payoff = _strategy.Heuristic(gameState);
+        }
+        
         if (_useMAST)
         {
             foreach (Move mv in visitedMoves)
@@ -567,13 +641,17 @@ public class SOISMCTS : AI
         //need to traverse tree from the playout start node back up to the root of the tree
         //note that our path through the tree should hold references to tree nodes and hence can be updated directly
         //(program design could be improved here!)
-        for(int i = 0; i < pathThroughTree.Count; i++)
+        //for(int i = 0; i < pathThroughTree.Count; i++)
+        //note that we count from an index of one so that we dont update stats in the root node
+        for(int i = 1; i < pathThroughTree.Count; i++)
         {
             InfosetNode node = pathThroughTree[i];
             node.VisitCount += 1;
             node.TotalReward += finalPayout;
             node.MaxReward = Math.Max(finalPayout, node.MaxReward);
             node.AvailabilityCount += 1;
+            //update averge reward and UCBExploration values
+            node.UCB(K);
             //by definition the final node in the path through the tree wont have any compatible children in the tree
             //to see this there are two case, 1. where selected node has uvd.count =0 (and the expanded node is the same as the selected node
             //, in which case we should be in an end game state and there are no further children to include in the tree
@@ -608,8 +686,10 @@ public class SOISMCTS : AI
         foreach (InfosetNode node in rootNode._compatibleChildrenInTree)
         {
             if (node.MaxReward >= bestScore) //note heuristic can take a value of zero
+            //if(node.VisitCount >= bestScore)
             {
                 bestScore = node.MaxReward;
+                //bestScore = node.VisitCount;
                 bestMove = node.GetCurrentMoveFromParent();
                 bestNode = node;
             }   
@@ -756,10 +836,150 @@ public class SOISMCTS : AI
         }
     }
     
+    public double HeuristicFromMCTSBot(SeededGameState gameState)
+    {
+        int patronFavour = 50;
+        int patronNeutral = 10;
+        int patronUnfavour = -50;
+        int coinsValue = 1;
+        int powerValue = 40;
+        int prestigeValue = 50;
+        int agentOnBoardValue = 30;
+        int hpValue = 3;
+        int opponentAgentsPenaltyValue = 40;
+        int potentialComboValue = 3;
+        int cardValue = 10;
+        int penaltyForHighTierInTavern = 2;
+        int numberOfDrawsValue = 10;
+        int enemyPotentialComboPenalty = 1;
+    
+        int finalValue = 0;
+        int enemyPatronFavour = 0;
+        foreach (KeyValuePair<PatronId, PlayerEnum> entry in gameState.PatronStates.All)
+        {
+            if (entry.Key == PatronId.TREASURY)
+            {
+                continue;
+            }
+            if (entry.Value == gameState.CurrentPlayer.PlayerID)
+            {
+                finalValue += patronFavour;
+            }
+            else if (entry.Value == PlayerEnum.NO_PLAYER_SELECTED)
+            {
+                finalValue += patronNeutral;
+            }
+            else
+            {
+                finalValue += patronUnfavour;
+                enemyPatronFavour += 1;
+            }
+        }
+        if (enemyPatronFavour >= 2)
+        {
+            finalValue -= 100;
+        }
+
+        finalValue += gameState.CurrentPlayer.Power * powerValue;
+        finalValue += gameState.CurrentPlayer.Prestige * prestigeValue;
+        //finalValue += gameState.CurrentPlayer.Coins * coinsValue;
+
+        if (gameState.CurrentPlayer.Prestige < 30)
+        {
+            TierEnum tier = TierEnum.UNKNOWN;
+
+            foreach (SerializedAgent agent in gameState.CurrentPlayer.Agents)
+            {
+                tier = CardTierList.GetCardTier(agent.RepresentingCard.Name);
+                finalValue += agentOnBoardValue * (int)tier + agent.CurrentHp * hpValue;
+            }
+
+            foreach (SerializedAgent agent in gameState.EnemyPlayer.Agents)
+            {
+                tier = CardTierList.GetCardTier(agent.RepresentingCard.Name);
+                finalValue -= agentOnBoardValue * (int)tier + agent.CurrentHp * hpValue + opponentAgentsPenaltyValue;
+            }
+
+            List<UniqueCard> allCards = gameState.CurrentPlayer.Hand.Concat(gameState.CurrentPlayer.Played.Concat(gameState.CurrentPlayer.CooldownPile.Concat(gameState.CurrentPlayer.DrawPile))).ToList();
+            Dictionary<PatronId, int> potentialComboNumber = new Dictionary<PatronId, int>();
+            List<UniqueCard> allCardsEnemy = gameState.EnemyPlayer.Hand.Concat(gameState.EnemyPlayer.DrawPile).Concat(gameState.EnemyPlayer.Played.Concat(gameState.EnemyPlayer.CooldownPile)).ToList();
+            Dictionary<PatronId, int> potentialComboNumberEnemy = new Dictionary<PatronId, int>();
+
+            foreach (UniqueCard card in allCards)
+            {
+                tier = CardTierList.GetCardTier(card.Name);
+                finalValue += (int)tier * cardValue;
+                if (card.Deck != PatronId.TREASURY)
+                {
+                    if (potentialComboNumber.ContainsKey(card.Deck))
+                    {
+                        potentialComboNumber[card.Deck] += 1;
+                    }
+                    else
+                    {
+                        potentialComboNumber[card.Deck] = 1;
+                    }
+                }
+            }
+
+            foreach (UniqueCard card in allCardsEnemy)
+            {
+                if (card.Deck != PatronId.TREASURY)
+                {
+                    if (potentialComboNumberEnemy.ContainsKey(card.Deck))
+                    {
+                        potentialComboNumberEnemy[card.Deck] += 1;
+                    }
+                    else
+                    {
+                        potentialComboNumberEnemy[card.Deck] = 1;
+                    }
+                }
+            }
+
+            foreach (KeyValuePair<PatronId, int> entry in potentialComboNumber)
+            {
+                finalValue += (int)Math.Pow(entry.Value, potentialComboValue);
+            }
+
+            foreach (Card card in gameState.TavernAvailableCards)
+            {
+                tier = CardTierList.GetCardTier(card.Name);
+                finalValue -= penaltyForHighTierInTavern * (int)tier;
+                /*
+                if (potentialComboNumberEnemy.ContainsKey(card.Deck) && (potentialComboNumberEnemy[card.Deck]>4) && (tier > TierEnum.B)){
+                    finalValue -= enemyPotentialComboPenalty*(int)tier;
+                }
+                */
+            }
+
+        }
+
+        //int finalValue = gameState.CurrentPlayer.Power + gameState.CurrentPlayer.Prestige;
+        double normalizedValue = NormalizeHeuristic(finalValue);
+
+        return normalizedValue;
+    }
+
+    private double NormalizeHeuristic(int value)
+    {
+        int heuristicMax = 40000; //160
+        int heuristicMin = -10000;//00
+    
+        double normalizedValue = ((double)value - (double)heuristicMin) / ((double)heuristicMax - (double)heuristicMin);
+
+        if (normalizedValue < 0)
+        {
+            return 0.0;
+        }
+
+        return normalizedValue;
+    }
+    
     public override void GameEnd(EndGameState state, FullGameState? finalBoardState)
     {
         double avgMovesPerTurn = _moveCounter/ (1.0 * _turnCounter);
-        double avgSimsPerMove = _simsCounter / (1.0 * _moveCounter);
+        double avgSimsPerMove = _simsCounter / (1.0 * _movesWithSimsCounter);
         double avgDepthPerMove = _depthCounter/ (1.0 * _widthAndDepthCalcCount);
         double avgMoveTimeOutsPerTurn = _moveTimeOutCounter/(1.0 * _turnCounter);
         
@@ -835,10 +1055,12 @@ public class InfosetNode
     public double MaxReward;
     public int VisitCount;
     public int AvailabilityCount;
+    public double AvgReward;
+    public double UCBExploration;
     
     //Next we have a reference move history that keeps it's value between MCTS iterations and changing determinisations,
     //Any nodes with identical reference move histories are ocnsidered ot be the same node
-    private List<Move> _refMoveHistory;
+    public List<Move> _refMoveHistory;
     
     //member variables to keep track of current determinisation being used, which children are compatible with the current
     //detereminisation and are in the tree, also the list of moves used to get to this node based on the current determinisation.
@@ -979,7 +1201,15 @@ public class InfosetNode
 
     public Move GetCurrentMoveFromParent()
     {
-        return _currentMoveHistory[_currentMoveHistory.Count - 1];
+        if (_currentMoveHistory.Count != 0)
+        {
+            return _currentMoveHistory[_currentMoveHistory.Count - 1];
+        }
+        else
+        {
+            return null;
+        }
+        //return _currentMoveHistory[_currentMoveHistory.Count - 1];
     }
     
     public Determinisation? GetCurrentDeterminisation()
@@ -990,7 +1220,9 @@ public class InfosetNode
     //calculate upper confidence bound for trees, bandit algorithm for MCTS tree policy
     public double UCB(double K)
     {
-        double ucbVal = TotalReward / (VisitCount * 1.0) + K * Math.Sqrt(Math.Log(AvailabilityCount) / (VisitCount * 1.0));
+        AvgReward = TotalReward / (VisitCount * 1.0);
+        UCBExploration = K * Math.Sqrt(Math.Log(AvailabilityCount) / (VisitCount * 1.0));
+        double ucbVal = AvgReward + UCBExploration;
         return ucbVal;
     }
     
