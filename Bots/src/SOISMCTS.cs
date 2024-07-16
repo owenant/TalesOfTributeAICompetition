@@ -13,6 +13,10 @@ using System.Text;
 using System.IO;
 using System.Reflection.Emit;
 
+//note this bot has dependencies on AgentTierList.cs, HandTierList.cs, GameStrategy.cs, TreeReporter.cs,
+//and MoveComparer in BestMCTS3.cs
+//AgentTierList and HandTierList have been updated since use in last competition to include new cards.
+
 namespace Bots;
 
 //class to implement single observer information set monte carlo tree search. This implementation only 
@@ -26,7 +30,7 @@ public class SOISMCTS : AI
     private InfosetNode? _reusedRootNode;
     
     //parameters for random determinisations
-    private bool _randomDeterminisations = true;
+    private bool _randomDeterminisations = false;
     private int _noSimsPerRandomisation = 1;
     
     //Parameters and data structure for MAST statistics
@@ -36,10 +40,13 @@ public class SOISMCTS : AI
     private Dictionary<MASTMoveKey, (double totalReward, int count)> mastStats;
     
     //boolean to turn move filtering on and off
-    private bool _filterMoves = false;
+    private bool _filterMoves = true;
     
-    //boolean to choose heuristic 
-    private bool _useMCTSBotHeuristic = true;
+    //boolean to choose heuristic, if false use BestMCTS3 bot heuristic
+    private bool _useMCTSBotHeuristic = false;
+    
+    //parameter to choose between max reward and visit count for move selection. If false uses visit count
+    private bool _useMaxReward = true;
     
     //parameters for MCTS
     private readonly double K = Math.Sqrt(2); 
@@ -100,7 +107,6 @@ public class SOISMCTS : AI
     
     //Taken from BestMCTS3 - as we reuse the same heuristic
     private GameStrategy _strategy = new(10, GamePhase.EarlyGame);
-    
     
     private void PrepareForGame()
     { 
@@ -309,9 +315,9 @@ public class SOISMCTS : AI
             }
             //increase width calculator counter used to normalise previous counts
             _widthAndDepthCalcCount += 1;
-            
             //this move used simulation (as opposed to just being from a choice of one move)
             _movesWithSimsCounter += 1;
+
 
             //finally we return the move from the root node that corresponds ot the best move
             (chosenMove, nextNode) = chooseBestMove(root);
@@ -334,8 +340,6 @@ public class SOISMCTS : AI
         {
             _reusedRootNode = prepareRootNodeForNextIteration(chosenMove, nextNode);
         }
-        //_usedTimeInTurn += moveTimer.Elapsed;
-        //_noMovesThisTurn += 1;
         
         if (chosenMove.Command == CommandEnum.END_TURN)
         {
@@ -343,9 +347,7 @@ public class SOISMCTS : AI
             _turnCounter += 1;
             _usedTimeInTurn = TimeSpan.FromSeconds(0);
         }
-
-        // moveTimer.Stop();
-        // _totalTimeForGame += moveTimer.Elapsed;
+        
         _moveCounter += 1;
         
         return chosenMove;
@@ -355,8 +357,8 @@ public class SOISMCTS : AI
     {
         //to prepare a node for re-use in the next iteration we need to do the following things
         //1. Set it's parent to null
-        //2. Remove the move used to reach this node from it's move history and all it's children's move histories.
-        //Note current determinisations can be ignored as they will be reset in the next iteration
+        //2. Remove the move used ot reach this node from it's move history and all it's children's move histories.
+        //Note current determinisations can be ignored as tehyw ill be reset in the next iteration
         node.Parent = null; //clear parent
         int layer = node.GetRefMoveHistoryLength();
         node.clearRefHistory();
@@ -651,14 +653,25 @@ public class SOISMCTS : AI
         //foreach (InfosetNode node in rootNode.Children) 
         foreach (InfosetNode node in rootNode._compatibleChildrenInTree)
         {
-            //if (node.MaxReward >= bestScore) //note heuristic can take a value of zero
-            if(node.VisitCount >= bestScore)
+            if (_useMaxReward)
             {
-                //bestScore = node.MaxReward;
-                bestScore = node.VisitCount;
-                bestMove = node.GetCurrentMoveFromParent();
-                bestNode = node;
-            }   
+                if(node.MaxReward >= bestScore)
+                {
+                    bestScore = node.MaxReward;
+                    bestMove = node.GetCurrentMoveFromParent();
+                    bestNode = node;
+                }  
+            }
+            else
+            {
+                if(node.VisitCount >= bestScore)
+                {
+                    bestScore = node.VisitCount;
+                    bestMove = node.GetCurrentMoveFromParent();
+                    bestNode = node;
+                }  
+            }
+       
         }
         
         return (bestMove, bestNode);
@@ -973,10 +986,11 @@ public class SOISMCTS : AI
         _log.Log(finalBoardState.CurrentPlayer.PlayerID, message);
         int minutes = _totalTimeForGame.Minutes;
         int seconds = _totalTimeForGame.Seconds;
-        message = "Time taken by SOISMCTS bot for this game: " + $"Elapsed time: {minutes} minutes and {seconds} seconds.";
-        _log.Log(finalBoardState.CurrentPlayer.PlayerID, message);
+        //message = "Time taken by SOISMCTS bot for this game: " + $"Elapsed time: {minutes} minutes and {seconds} seconds.";
+        //_log.Log(finalBoardState.CurrentPlayer.PlayerID, message);
         message = "total number of sims across all games: " + _totalSimsCounter.ToString();
         _log.Log(finalBoardState.CurrentPlayer.PlayerID, message);
+
         // message = "Rolling total of moves per turn across game: " + DictionaryToString<int,int>(_rollingCountOfMovesInEachTurnAcrossGames);
         // _log.Log(finalBoardState.CurrentPlayer.PlayerID, message);
         //
@@ -989,6 +1003,7 @@ public class SOISMCTS : AI
         // message = "Expected number of moves per turn: " + DictionaryToString<int,double>(_expNoMovesPerTurn);
         // _log.Log(finalBoardState.CurrentPlayer.PlayerID, message);
         //
+
         //prepare for next game
         this.PrepareForGame();
     }
@@ -1366,5 +1381,4 @@ public class MASTMoveKey
         return _mv;
     }
 }
-
 
