@@ -19,53 +19,17 @@ namespace Bots;
 //searches a tree of moves for the current player's turn, so the observer is the current player.
 public class SOISMCTS : AI
 {
-    //parameters for computational budget
-    private TimeSpan _usedTimeInTurn = TimeSpan.FromSeconds(0); //tracks how long we are spending on current turn
-    private TimeSpan _timeForMoveComputation; //time limit for current move
-    private readonly TimeSpan _turnTimeout = TimeSpan.FromSeconds(9.9); //total time limit for turn
-    private TimeSpan _totalTimeForGame; //time taken for this game
-    
-    //logger and random seed
-    private SeededRandom _intRng; //this is used for random integers
-    private Random _doubleRng;// this is used for random doubles
-    private Logger _log;
-    private bool _outputTreeStructureToLogFile = false;
-    string _logFilePath = "SOIMCTS_Tree_Log.txt";
-    //private StreamWriter _logWriter;
-    
-    //boolean to track start of turn 
-    private bool _startOfTurn = true;
-    
-    //counters to track stats for a single game
-    private int _simsCounter; // total number of MCTS simulations for a single game 
-    private int _turnCounter; // total number of turns for a single game
-    private int _moveCounter; // total number of moves for a single game
-    private int _movesWithSimsCounter; //total number of moves for a single game which use MCTS simulation loop
-    
-    //variables ot track stats for a single move
-    private static int _depthCounter ; //total final tree depth prior to choosing move
-    private static int _widthAndDepthCalcCount; //used tp normalise values in _widthTreeLayers and to normalise _depthCounter
-    private static List<int> _widthTreeLayers; //number of nodes in each layer of tree when choosing move (which are assuming we
-    //dont go more than five levels deep)
-    private static int _moveTimeOutCounter; //number of times we time out a move across a game
-    
-    //counters across multiple games
-    private static int _gameCounter; // total number of games played in a session
-    private static int _totalSimsCounter; //tracks total number of sims across all games played in a session
-    
-    //parameters for MCTS
-    private readonly double K = Math.Sqrt(2); 
-    
-    //Taken from BestMCTS3 - as we reuse the same heuristic
-    private GameStrategy _strategy = new(10, GamePhase.EarlyGame);
+    //run configuration paraameters
     
     //parameters for re-using tree between moves
-    private bool _treeReuse = true;
-    private bool _randomDeterminisations = false;
-    private int _noSimsPerRandomisation = 100;
+    private bool _treeReuse = false;
     private InfosetNode? _reusedRootNode;
     
-    //data structure for MAST statistics
+    //parameters for random determinisations
+    private bool _randomDeterminisations = true;
+    private int _noSimsPerRandomisation = 1;
+    
+    //Parameters and data structure for MAST statistics
     private bool _useMAST = false;
     private double _temperature = 1.0; //parameter for gibbs distribution
     private double _thresholdForRandomMoves = 0.1; //parameter to choose a random move instead of move from Gibbs distribution
@@ -74,6 +38,13 @@ public class SOISMCTS : AI
     //boolean to turn move filtering on and off
     private bool _filterMoves = false;
     
+    //boolean to choose heuristic 
+    private bool _useMCTSBotHeuristic = true;
+    
+    //parameters for MCTS
+    private readonly double K = Math.Sqrt(2); 
+    
+    //parameters for computational budget
     //turn on time allocation by move
     private bool _timeAllocation = false;
     //we use the expected number of  moves by turn to allocation computational budget
@@ -91,12 +62,45 @@ public class SOISMCTS : AI
         {9, 10}, {10, 9}, {11, 9}, {12, 7}, {13, 6}, {14, 4}, {15, 3}, {16, 3}, {17, 2}, 
         {18, 1}, {19, 1}, {20, 1}, {21, 1}, {22, 1}, {23, 1}, {24, 1}
     };
-    
-    //the above is computed from the following which are outputted to the log file
-    private Dictionary<int, int> _rollingCountOfMovesInEachTurnAcrossGames = new Dictionary<int, int>();
-    //private int _noMovesThisTurn; //used in time allocation
+    private TimeSpan _usedTimeInTurn = TimeSpan.FromSeconds(0); //tracks how long we are spending on current turn
+    private TimeSpan _timeForMoveComputation; //time limit for current move
+    private readonly TimeSpan _turnTimeout = TimeSpan.FromSeconds(9.9); //total time limit for turn based on competition rules
+    //the can be used ot calibrate the number of expected moves per turn for the dictionary above
+    //private Dictionary<int, int> _rollingCountOfMovesInEachTurnAcrossGames = new Dictionary<int, int>();
 
-    private bool _useMCTSBotHeuristic = true;
+    //logger and random seed
+    private SeededRandom _intRng; //this is used for random integers
+    private Random _doubleRng;// this is used for random doubles
+    private Logger _log;
+    private bool _outputTreeStructureToLogFile = false;
+    private int _noIterationsPerLog = 100; //how often to output tree structure as we progress through MC loop
+    private bool _logChosenMove = false;
+    string _logFilePath = "SOIMCTS_Tree_Log.txt";
+    
+    //boolean to track start of turn 
+    private bool _startOfTurn = true;
+    
+    //counters to track stats for a single game
+    private int _simsCounter; // total number of MCTS simulations for a single game 
+    private int _turnCounter; // total number of turns for a single game
+    private int _moveCounter; // total number of moves for a single game
+    private int _movesWithSimsCounter; //total number of moves for a single game which use MCTS simulation loop
+    private TimeSpan _totalTimeForGame; //time taken for this game
+    
+    //counters across multiple games
+    private static int _gameCounter; // total number of games played in a session
+    private static int _totalSimsCounter; //tracks total number of sims across all games played in a session
+    
+    //variables to track stats for a single move
+    private static int _depthCounter ; //total final tree depth prior to choosing move
+    private static int _widthAndDepthCalcCount; //used tp normalise values in _widthTreeLayers and to normalise _depthCounter
+    private static List<int> _widthTreeLayers; //number of nodes in each layer of tree when choosing move (which are assuming we
+    //dont go more than five levels deep)
+    private static int _moveTimeOutCounter; //number of times we time out a move across a game
+    
+    //Taken from BestMCTS3 - as we reuse the same heuristic
+    private GameStrategy _strategy = new(10, GamePhase.EarlyGame);
+    
     
     private void PrepareForGame()
     { 
@@ -138,12 +142,8 @@ public class SOISMCTS : AI
         //initialise time for move computation to a fixed time if we are not allocating time by turn
         if (!_timeAllocation)
         {
-            //_timeForMoveComputation = TimeSpan.FromSeconds(0.55);
-            _timeForMoveComputation = TimeSpan.FromSeconds(0.3);
+            _timeForMoveComputation = TimeSpan.FromSeconds(0.55);
         }
-        
-        //stream writer for tree structure reporting
-        //_logWriter = new StreamWriter(_logFilePath, true);
     }
 
     public SOISMCTS()
@@ -158,10 +158,6 @@ public class SOISMCTS : AI
 
     public override Move Play(GameState gameState, List<Move> possibleMoves, TimeSpan remainingTime)
     {
-        //timer for this move
-        //Stopwatch moveTimer = new Stopwatch();
-        //moveTimer.Start();
-        
         if (_startOfTurn)
         {
             _usedTimeInTurn = TimeSpan.FromSeconds(0);
@@ -170,16 +166,11 @@ public class SOISMCTS : AI
             //we maintain MAST stats across moves within a turn
             mastStats = new Dictionary<MASTMoveKey, (double totalReward, int count)>();
             
-            //initialise move counter for this turn
-            //_noMovesThisTurn = 0;
-            
             if (_timeAllocation)
             {
-                //in this case we allocate time for this move based on remaining time budget available
-                //TimeSpan remainingTimeForTurn = (_turnTimeout - _usedTimeInTurn);
+                //in this case we allocate time for this move based on the expected number of moves this turn
                 double expNoMovesForThisTurn =
                     _expNoMovesPerTurn.TryGetValue(_turnCounter, out double noMoves) ? noMoves : 1;
-                //double expectedNoOfRemainingMoves = Math.Max(expNoMovesForThisTurn - _noMovesThisTurn, 1);
                 _timeForMoveComputation = _turnTimeout / (1.0 * (expNoMovesForThisTurn));
             }
         }
@@ -188,15 +179,10 @@ public class SOISMCTS : AI
         if (possibleMoves.Count == 1 && possibleMoves[0].Command == CommandEnum.END_TURN)
         {
             _startOfTurn = true;
-            //_usedTimeInTurn = TimeSpan.FromSeconds(0);
             _moveCounter += 1;
-            //_widthTreeLayers[0] += 1;
-            //_widthCalcCount += 1;
-            _rollingCountOfMovesInEachTurnAcrossGames[_turnCounter] 
-                = _rollingCountOfMovesInEachTurnAcrossGames.TryGetValue(_turnCounter, out int count1) ? count1 + 1 : 1;
+            //_rollingCountOfMovesInEachTurnAcrossGames[_turnCounter] 
+            //    = _rollingCountOfMovesInEachTurnAcrossGames.TryGetValue(_turnCounter, out int count1) ? count1 + 1 : 1;
             _turnCounter += 1;
-            //_noMovesThisTurn = 0;ƒ
-            //_usedTimeInTurn += moveTimer.Elapsed;
             return possibleMoves[0];
         }
         
@@ -214,7 +200,7 @@ public class SOISMCTS : AI
         {
             root = new InfosetNode(null, null, d);
         }
-        _reusedRootNode = null; //TODO: does this reset our reused node?
+        _reusedRootNode = null; 
         _startOfTurn = false;
         
         //check to see if we only have one move available after filtering moves and if so just return that
@@ -224,27 +210,14 @@ public class SOISMCTS : AI
             {
                 //TODO::do we need to do anything here? Can we get here with a previous node that is null?
                 //since we expect as soon as we get a choice all future moves will have a choice, until they dont
-                //but shoudlnt have the situation where we have one filtered moves repeatedly, then a choice, then
+                //but shouldnt have the situation where we have one filtered moves repeatedly, then a choice, then
                 //only one filtered move afterwards......
             }
             _moveCounter += 1;
-            //_timeBuffer += _timeForMoveComputation;
-            _rollingCountOfMovesInEachTurnAcrossGames[_turnCounter] 
-                = _rollingCountOfMovesInEachTurnAcrossGames.TryGetValue(_turnCounter, out int count2) ? count2 + 1 : 1;
-            //_noMovesThisTurn += 1;
-            //_usedTimeInTurn += moveTimer.Elapsed;
+            //_rollingCountOfMovesInEachTurnAcrossGames[_turnCounter] 
+             //   = _rollingCountOfMovesInEachTurnAcrossGames.TryGetValue(_turnCounter, out int count2) ? count2 + 1 : 1;
             return filteredMoves[0];
         }
-        
-        // if (_timeAllocation)
-        // {
-        //     //in this case we allocate time for this move based on remaining time budget available
-        //     TimeSpan remainingTimeForTurn = (_turnTimeout - _usedTimeInTurn);
-        //     double expNoMovesForThisTurn =
-        //         _expNoMovesPerTurn.TryGetValue(_turnCounter, out double noMoves) ? noMoves : 1;
-        //     double expectedNoOfRemainingMoves = Math.Max(expNoMovesForThisTurn - _noMovesThisTurn, 1);
-        //     _timeForMoveComputation = 0.9999* remainingTimeForTurn / (1.0 * (expectedNoOfRemainingMoves));
-        // }
         
         Move chosenMove = null;
         InfosetNode nextNode = null;
@@ -253,17 +226,16 @@ public class SOISMCTS : AI
             _moveTimeOutCounter += 1;
             //if we run out of time for this move, don't choose end turn
             chosenMove = NotEndTurnPossibleMoves(filteredMoves).PickRandom(_intRng);
-            //chosenMove = possibleMoves.PickRandom(_intRng);
         }
         else
         {
             int maxDepthForThisMove = 0;
             Stopwatch timer = new Stopwatch(); //why does this not have an issue with multi-threading?
             timer.Start();
-            int noIterations = 0;
+            int noIterations = 1;
             while (timer.Elapsed < _timeForMoveComputation)
-            //int maxIterations = 100;
-            //for(int i = 0; i < maxIterations; i++)
+            //int maxIterations = 10000;
+            //for(int i = 1; i <= maxIterations; i++)
             {
                 //in InfosetMCTS each iteration of the loop starts with a new determinisation, which we use to explore the same tree
                 //updating the stats for each tree node
@@ -285,7 +257,6 @@ public class SOISMCTS : AI
 
                 //if selected node has moves leading to nodes not in the tree then expand the tree
                 InfosetNode selectedNode = pathThroughTree[pathThroughTree.Count -1];
-                //List<Move> uvd = selectedNode.GetMovesWithNoChildren();
                 InfosetNode expandedNode = selectedNode;
                 
                 //dont expand an end_turn node
@@ -301,37 +272,28 @@ public class SOISMCTS : AI
                     }
                 }
 
-                // if (expandedNode.Parent.Parent == null)
-                // {
-                //     if (expandedNode.GetCurrentMoveFromParent().Command == CommandEnum.END_TURN)
-                //     {
-                //         int j = 0;
-                //     }
-                // }
-
                 //next we simulate our playouts from our expanded node 
                 double payoutFromExpandedNode = Rollout(expandedNode);
 
                 //next we complete the backpropagation step
                 BackPropagation(payoutFromExpandedNode, pathThroughTree);
-
-                _simsCounter += 1;
-                _totalSimsCounter += 1;
-
-                maxDepthForThisMove = Math.Max(maxDepthForThisMove, pathThroughTree.Count);
-
-               if (_outputTreeStructureToLogFile && (noIterations % 10 == 0))
-               //if (_outputTreeStructureToLogFile && _turnCounter == 0)
+                
+                if (_outputTreeStructureToLogFile && (noIterations % _noIterationsPerLog == 0))
                 {
                     using (StreamWriter logWriter = new StreamWriter(_logFilePath, true))  // Append mode
                     {
                         logWriter.WriteLine("Iteration number:" + noIterations.ToString());
                         logWriter.WriteLine("Turn number:" + _turnCounter.ToString());
+                        logWriter.WriteLine("Move number:" + _moveCounter.ToString());
                         TreeReporter.ReportTreeStructure(root, K, logWriter);
                         logWriter.WriteLine();
                     }
                 }
                 
+                //update counters and max depth found ofr this iteration
+                _simsCounter += 1;
+                _totalSimsCounter += 1;
+                maxDepthForThisMove = Math.Max(maxDepthForThisMove, pathThroughTree.Count);
                 noIterations += 1;
             }
             _usedTimeInTurn += _timeForMoveComputation;
@@ -339,27 +301,33 @@ public class SOISMCTS : AI
             //increase depth counter
             _depthCounter += maxDepthForThisMove;
             
-            //increase width counter
+            //determine final width and depth of tree
             Dictionary<int,int> treeWidthForEachLayerForThisMove = InfosetNode.CalculateLayerSpans(root);
             for (int i = 0; i < maxDepthForThisMove; i++)
             {
-                if (treeWidthForEachLayerForThisMove[0] != 1)
-                {
-                    int j = 0;
-                }
                 _widthTreeLayers[i] += treeWidthForEachLayerForThisMove[i];
             }
             //increase width calculator counter used to normalise previous counts
             _widthAndDepthCalcCount += 1;
+            
+            //this move used simulation (as opposed to just being from a choice of one move)
+            _movesWithSimsCounter += 1;
 
             //finally we return the move from the root node that corresponds ot the best move
             (chosenMove, nextNode) = chooseBestMove(root);
 
-            _movesWithSimsCounter += 1;
+            //output chosen move to log file
+            if (_logChosenMove)
+            {
+                using (StreamWriter logWriter = new StreamWriter(_logFilePath, true)) // Append mode
+                {
+                    logWriter.WriteLine("Chosen Move: " + chosenMove.ToString());
+                }
+            }
         }
         
-        _rollingCountOfMovesInEachTurnAcrossGames[_turnCounter] 
-            = _rollingCountOfMovesInEachTurnAcrossGames.TryGetValue(_turnCounter, out int count3) ? count3 + 1 : 1;
+        //_rollingCountOfMovesInEachTurnAcrossGames[_turnCounter] 
+        //    = _rollingCountOfMovesInEachTurnAcrossGames.TryGetValue(_turnCounter, out int count3) ? count3 + 1 : 1;
         
         //set-up root node for next move
         if (_treeReuse)
@@ -387,7 +355,7 @@ public class SOISMCTS : AI
     {
         //to prepare a node for re-use in the next iteration we need to do the following things
         //1. Set it's parent to null
-        //2. Remove the move used ot reach this node from it's move history and all it's children's move histories.
+        //2. Remove the move used to reach this node from it's move history and all it's children's move histories.
         //Note current determinisations can be ignored as they will be reset in the next iteration
         node.Parent = null; //clear parent
         int layer = node.GetRefMoveHistoryLength();
@@ -639,9 +607,7 @@ public class SOISMCTS : AI
     private void BackPropagation(double finalPayout, List<InfosetNode> pathThroughTree)
     {
         //need to traverse tree from the playout start node back up to the root of the tree
-        //note that our path through the tree should hold references to tree nodes and hence can be updated directly
-        //(program design could be improved here!)
-        //for(int i = 0; i < pathThroughTree.Count; i++)
+        //note that our path through the tree holds references to tree nodes and hence can be updated directly
         //note that we count from an index of one so that we dont update stats in the root node
         for(int i = 1; i < pathThroughTree.Count; i++)
         {
@@ -685,11 +651,11 @@ public class SOISMCTS : AI
         //foreach (InfosetNode node in rootNode.Children) 
         foreach (InfosetNode node in rootNode._compatibleChildrenInTree)
         {
-            if (node.MaxReward >= bestScore) //note heuristic can take a value of zero
-            //if(node.VisitCount >= bestScore)
+            //if (node.MaxReward >= bestScore) //note heuristic can take a value of zero
+            if(node.VisitCount >= bestScore)
             {
-                bestScore = node.MaxReward;
-                //bestScore = node.VisitCount;
+                //bestScore = node.MaxReward;
+                bestScore = node.VisitCount;
                 bestMove = node.GetCurrentMoveFromParent();
                 bestNode = node;
             }   
